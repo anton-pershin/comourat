@@ -1,0 +1,62 @@
+[project]
+name = "comourat"
+description = "A library for web post and paper collection"
+dynamic = ["version"]
+authors = [
+  {name = "Anton Pershin", email = "tony.pershin@gmail.com"},
+]
+readme = "README.md"
+requires-python = ">= 3.12"
+dependencies = [
+  "praw >= 7.7.0",
+  "rich >= 14.0.0",
+  "feedparser",
+  "httpx",
+  "requests",
+  "PySocks",  # SOCKS proxies need it; requests reports a missing import
+  "beautifulsoup4",
+  "trafilatura",
+  "pydantic",
+  "pydantic-ai",
+]
+
+[build-system]
+requires = ["hatchling >= 1.26", "versioningit"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "versioningit"
+
+[tool.hatch.build.targets.wheel]
+packages = ["comourat"]
+
+[tool.versioningit]
+default-version = "0.0.0"
+
+[tool.black]
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.pylint]
+max-line-length = 88
+min-similarity-lines = 12
+
+[tool.pylint.'MESSAGES CONTROL']
+disable = [
+    "missing-docstring",      # Disable docstring requirements
+    "too-few-public-methods", # Allow classes with few methods
+    "too-many-arguments",
+    "too-many-positional-arguments",
+    "wrong-import-order",     # Already addressed by isort
+    "too-many-instance-attributes",
+    "too-many-locals",
+    "no-else-return",
+    "too-many-return-statements",
+    "redefined-builtin",
+]
+
+[tool.mypy]
+disable_error_code = ["import-untyped"]
