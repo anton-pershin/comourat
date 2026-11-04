@@ -6,20 +6,28 @@ import contextvars
 import ipaddress
 import math
 import queue
+import re
 import socket
 import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from types import MethodType
 from typing import Any
 from urllib.parse import urlsplit
 
+import idna
 import requests
 
 from comourat.proxy import ProxyConfigurationError, validate_proxy_url
 
 Resolver = Callable[[str, int], Iterable[tuple]]
 Clock = Callable[[], float]
+
+_TRUSTED_PROXY_PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+)
 
 
 class FetchError(requests.RequestException):
@@ -42,11 +50,20 @@ class _DeadlineExceeded(TimeoutError):
     pass
 
 
-@dataclass(frozen=True)
 class _Deadline:
-    timeout: float
-    clock: Clock
-    started: float
+    """Monotonic deadline with a watchdog that aborts registered sockets."""
+
+    def __init__(self, timeout: float, clock: Clock, started: float) -> None:
+        self.timeout = timeout
+        self.clock = clock
+        self.started = started
+        self._lock = threading.Lock()
+        self._sockets: set[Any] = set()
+        self._active = True
+        self._timed_out = False
+        self._timer = threading.Timer(timeout, self._abort)
+        self._timer.daemon = True
+        self._timer.start()
 
     @classmethod
     def start(cls, timeout: float, clock: Clock) -> _Deadline:
@@ -54,12 +71,54 @@ class _Deadline:
 
     def remaining(self) -> float:
         remaining = self.timeout - (self.clock() - self.started)
-        if remaining <= 0:
+        if self._timed_out or remaining <= 0:
             raise _DeadlineExceeded("overall fetch deadline exceeded")
         return remaining
 
     def expired(self) -> bool:
-        return self.clock() - self.started >= self.timeout
+        return self._timed_out or self.clock() - self.started >= self.timeout
+
+    def register(self, sock) -> None:
+        """Register a real or TLS socket for mandatory deadline abortion."""
+        with self._lock:
+            if not self._active or self.expired():
+                close_now = True
+            else:
+                self._sockets.add(sock)
+                close_now = False
+        if close_now:
+            self._close_socket(sock)
+            raise _DeadlineExceeded("overall fetch deadline exceeded")
+
+    @staticmethod
+    def _close_socket(sock) -> None:
+        try:
+            shutdown = getattr(sock, "shutdown", None)
+            if shutdown is not None:
+                shutdown(socket.SHUT_RDWR)
+        except (OSError, ValueError, RuntimeError):
+            pass
+        try:
+            sock.close()
+        except (OSError, ValueError, RuntimeError):
+            pass
+
+    def _abort(self) -> None:
+        with self._lock:
+            if not self._active:
+                return
+            self._timed_out = True
+            self._active = False
+            sockets = tuple(self._sockets)
+            self._sockets.clear()
+        for sock in sockets:
+            self._close_socket(sock)
+
+    def close(self) -> None:
+        self._timer.cancel()
+        with self._lock:
+            self._active = False
+            self._sockets.clear()
 
 
 _current_deadline: contextvars.ContextVar[_Deadline | None] = contextvars.ContextVar(
@@ -77,6 +136,47 @@ class _Target:
     @property
     def display_host(self) -> str:
         return f"[{self.host}]" if ":" in self.host else self.host
+
+
+def _redact_url(url: str) -> str:
+    """Return only scheme and host for safe logs and error messages."""
+    try:
+        parts = urlsplit(url)
+        if not parts.scheme or not parts.hostname:
+            return "<redacted URL>"
+        host = parts.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parts.port}" if parts.port is not None else ""
+        return f"{parts.scheme}://{host}{port}"
+    except (TypeError, ValueError):
+        return "<redacted URL>"
+
+
+def _redact_urls_in_text(text: str) -> str:
+    return re.sub(
+        r"https?://[^\s'\"<>]+",
+        lambda match: _redact_url(match.group(0)),
+        text,
+    )
+
+
+def _sanitize_exception(error: BaseException) -> None:
+    """Remove URL credentials, paths, and queries from exception chains."""
+    seen = set()
+
+    def sanitize(current: BaseException | None) -> None:
+        if current is None or id(current) in seen:
+            return
+        seen.add(id(current))
+        current.args = tuple(
+            _redact_urls_in_text(argument) if isinstance(argument, str) else argument
+            for argument in current.args
+        )
+        sanitize(current.__cause__)
+        sanitize(current.__context__)
+
+    sanitize(error)
 
 
 class FetchPolicy:
@@ -139,8 +239,13 @@ class FetchPolicy:
         if candidate.startswith("[") and candidate.endswith("]"):
             candidate = candidate[1:-1]
         try:
-            return candidate.encode("idna").decode("ascii").lower()
-        except UnicodeError as exc:
+            ipaddress.ip_address(candidate)
+            return candidate.lower()
+        except ValueError:
+            pass
+        try:
+            return idna.encode(candidate, uts46=True).decode("ascii").lower()
+        except (idna.IDNAError, UnicodeError) as exc:
             raise ValueError(f"invalid hostname: {host!r}") from exc
 
     def _parse_target(
@@ -221,7 +326,10 @@ class FetchPolicy:
         if any(self._matches_caller_denial(candidate) for candidate in candidates):
             raise FetchPolicyError("destination matches a caller deny rule")
         for candidate in candidates:
-            if proxy and (candidate.is_loopback or candidate.is_private):
+            trusted_private_proxy = any(
+                candidate in network for network in _TRUSTED_PROXY_PRIVATE_NETWORKS
+            )
+            if proxy and (candidate.is_loopback or trusted_private_proxy):
                 continue
             if self._has_builtin_denial(candidate):
                 kind = "proxy" if proxy else "target"
@@ -252,6 +360,21 @@ class FetchPolicy:
                 if family not in (socket.AF_INET, socket.AF_INET6):
                     raise FetchPolicyError("resolved address family is not supported")
                 address = ipaddress.ip_address(sockaddr[0])
+                expected_length = 2 if family == socket.AF_INET else 4
+                expected_version = 4 if family == socket.AF_INET else 6
+                if (
+                    len(sockaddr) != expected_length
+                    or address.version != expected_version
+                    or socktype != socket.SOCK_STREAM
+                ):
+                    raise FetchResolutionError("resolver returned an invalid answer")
+                port = sockaddr[1]
+                if (
+                    isinstance(port, bool)
+                    or not isinstance(port, int)
+                    or not 0 <= port <= 65535
+                ):
+                    raise FetchResolutionError("resolver returned an invalid port")
                 self._validate_address(address, proxy=proxy)
             except (ValueError, IndexError, TypeError) as exc:
                 if isinstance(exc, FetchPolicyError):
@@ -345,6 +468,18 @@ class SafeHttpClient:
         )
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
+        self._adapter = adapter
+        self._install_get_adapter()
+
+    def _install_get_adapter(self) -> None:
+        """Make policy validation authoritative over Requests mount prefixes."""
+        adapter = self._adapter
+
+        def get_adapter(_session, url):
+            self.policy._parse_target(url)
+            return adapter
+
+        self.session.get_adapter = MethodType(get_adapter, self.session)  # type: ignore[method-assign]
 
     @staticmethod
     def _system_resolver(host: str, port: int):
@@ -374,6 +509,7 @@ class SafeHttpClient:
 
     def _call(self, method, url: str, **kwargs):
         self.policy._parse_target(url)
+        self._install_get_adapter()
         if "proxies" in kwargs:
             raise ProxyConfigurationError(
                 "per-request proxies are not supported; configure the client"
@@ -387,11 +523,13 @@ class SafeHttpClient:
         except FetchPolicyError:
             raise
         except Exception as exc:
+            _sanitize_exception(exc)
             if deadline.expired():
                 raise FetchDeadlineExceeded("overall fetch deadline exceeded") from exc
             raise
         finally:
             _current_deadline.reset(token)
+            deadline.close()
 
     def get(self, url: str, **kwargs):
         return self._call(self.session.get, url, **kwargs)

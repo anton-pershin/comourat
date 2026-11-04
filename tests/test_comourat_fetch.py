@@ -12,10 +12,12 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
+from comourat._fetch_transport import _DeadlineRetry
 from comourat.fetch import (
     FetchDeadlineExceeded,
     FetchPolicy,
     FetchPolicyError,
+    FetchResolutionError,
     SafeHttpClient,
 )
 
@@ -29,6 +31,11 @@ class _Handler(BaseHTTPRequestHandler):
             target = self.server.redirect_target  # type: ignore[attr-defined]
             self.send_response(302)
             self.send_header("Location", target)
+            self.end_headers()
+            return
+        if self.path == "/redirect-scheme":
+            self.send_response(302)
+            self.send_header("Location", "file:///etc/passwd")
             self.end_headers()
             return
         if self.path == "/redirect-final":
@@ -279,16 +286,19 @@ def test_policy_and_deadline_errors_are_requests_exceptions():
     assert issubclass(FetchDeadlineExceeded, requests.Timeout)
 
 
-def test_alternative_ipv4_notation_is_checked_after_resolution(http_server_factory):
+@pytest.mark.parametrize("host", ["2130706433", "127.1", "0x7f000001", "017700000001"])
+def test_alternative_ipv4_notation_is_checked_after_resolution(
+    http_server_factory, host
+):
     prohibited = http_server_factory("127.0.0.1")
 
-    def resolver(host, port):
-        assert host == "2130706433"
+    def resolver(resolved_host, port):
+        assert resolved_host == host
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
 
     client = SafeHttpClient(resolver=resolver)
     with pytest.raises(FetchPolicyError):
-        client.get(f"http://2130706433:{prohibited.server_port}/")
+        client.get(f"http://{host}:{prohibited.server_port}/")
     assert prohibited.connections == 0
 
 
@@ -347,3 +357,198 @@ def test_concurrent_clients_keep_independent_policies():
 def test_redirect_and_retry_limits_must_be_non_negative_integers(field, value):
     with pytest.raises((ValueError, TypeError)):
         FetchPolicy(**{field: value})
+
+
+def test_idna_and_punycode_host_rules_are_equivalent():
+    for denied_host, target_host in (
+        ("faß.de", "xn--fa-hia.de"),
+        ("xn--fa-hia.de", "faß.de"),
+    ):
+        session = MagicMock()
+        client = SafeHttpClient(
+            session, fetch_policy=FetchPolicy(deny_hosts=[denied_host])
+        )
+        with pytest.raises(FetchPolicyError):
+            client.get(f"http://{target_host}/")
+        session.get.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "proxy_url",
+    [
+        "http://0.0.0.0:8080",
+        "http://169.254.169.254:8080",
+        "http://[::]:8080",
+        "http://[fe80::1]:8080",
+    ],
+)
+def test_trusted_proxy_exception_does_not_allow_special_use_addresses(proxy_url):
+    with pytest.raises(FetchPolicyError):
+        FetchPolicy()._parse_target(
+            proxy_url,
+            allowed_schemes=("http", "https", "socks4", "socks5", "socks5h"),
+            proxy=True,
+        )
+
+
+@pytest.mark.parametrize("proxy_url", ["http://10.0.0.1:8080", "http://[fd00::1]:8080"])
+def test_explicit_private_proxy_addresses_are_allowed(proxy_url):
+    target = FetchPolicy()._parse_target(
+        proxy_url,
+        allowed_schemes=("http", "https", "socks4", "socks5", "socks5h"),
+        proxy=True,
+    )
+    assert target.host in {"10.0.0.1", "fd00::1"}
+
+
+def test_empty_dns_answers_fail_before_connection():
+    client = SafeHttpClient(resolver=lambda host, port: [])
+    with pytest.raises(FetchResolutionError):
+        client.get("http://empty.test/")
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80, 0, 0)),
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 80)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("::1", 80)),
+        (socket.AF_INET, socket.SOCK_DGRAM, 17, "", ("127.0.0.1", 80)),
+    ],
+)
+def test_malformed_resolver_answers_fail_before_socket_creation(answer):
+    client = SafeHttpClient(resolver=lambda host, port: [answer])
+    with pytest.raises(FetchResolutionError):
+        client.get("http://malformed.test/")
+
+
+def test_second_allowed_address_is_tried_after_connection_failure(http_server_factory):
+    allowed = http_server_factory("127.0.0.2")
+
+    class TwoLoopbackPolicy(_LoopbackControlPolicy):
+        def _has_builtin_denial(self, address):
+            if address == ipaddress.ip_address("127.0.0.3"):
+                return False
+            return super()._has_builtin_denial(address)
+
+    def resolver(host, port):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.3", port)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.2", port)),
+        ]
+
+    client = SafeHttpClient(fetch_policy=TwoLoopbackPolicy(), resolver=resolver)
+    response = client.get(f"http://fallback.test:{allowed.server_port}/")
+    assert response.status_code == 200
+
+
+def test_injected_host_adapter_cannot_bypass_policy(http_server_factory):
+    allowed = http_server_factory("127.0.0.2")
+
+    class RejectingAdapter(requests.adapters.HTTPAdapter):
+        called = False
+
+        def send(self, *args, **kwargs):
+            self.called = True
+            raise AssertionError("unprotected host adapter was used")
+
+    rejecting = RejectingAdapter()
+    session = requests.Session()
+    session.mount("http://control.test", rejecting)
+
+    def resolver(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.2", port))]
+
+    client = SafeHttpClient(
+        session,
+        fetch_policy=_LoopbackControlPolicy(),
+        resolver=resolver,
+    )
+    session.mount("http://control.test:80", rejecting)
+    response = client.get(f"http://control.test:{allowed.server_port}/")
+    assert response.status_code == 200
+    assert rejecting.called is False
+
+
+def test_custom_scheme_adapter_cannot_execute_redirect(http_server_factory):
+    allowed = http_server_factory("127.0.0.2")
+
+    class RejectingAdapter(requests.adapters.HTTPAdapter):
+        called = False
+
+        def send(self, *args, **kwargs):
+            self.called = True
+            raise AssertionError("custom-scheme adapter was used")
+
+    rejecting = RejectingAdapter()
+    session = requests.Session()
+    session.mount("file://", rejecting)
+
+    def resolver(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.2", port))]
+
+    client = SafeHttpClient(
+        session,
+        fetch_policy=_LoopbackControlPolicy(),
+        resolver=resolver,
+    )
+    with pytest.raises(FetchPolicyError):
+        client.get(f"http://control.test:{allowed.server_port}/redirect-scheme")
+    assert rejecting.called is False
+
+
+def test_production_adapter_uses_deadline_retry_and_fails_closed_on_old_hook():
+    client = SafeHttpClient(fetch_policy=FetchPolicy(max_retries=2))
+    adapter = client.session.get_adapter("http://example.com")
+    assert isinstance(adapter.max_retries, _DeadlineRetry)
+    with pytest.raises(FetchPolicyError, match="2.32.0"):
+        adapter.get_connection(MagicMock())
+
+
+def test_transport_exception_urls_are_redacted():
+    session = MagicMock()
+    session.proxies = {}
+    session.get.side_effect = requests.ConnectionError(
+        "failed http://user:secret@example.com/private/path?token=sensitive"
+    )
+    client = SafeHttpClient(session)
+    with pytest.raises(requests.ConnectionError) as error:
+        client.get("http://example.com/private/path?token=sensitive")
+    message = str(error.value)
+    assert "secret" not in message
+    assert "sensitive" not in message
+    assert "/private/path" not in message
+    assert "http://example.com" in message
+
+
+@pytest.mark.parametrize("denied_first", [False, True])
+def test_caller_denied_mixed_answers_reject_entire_set_in_any_order(
+    http_server_factory, denied_first
+):
+    allowed = http_server_factory("127.0.0.2")
+    denied = http_server_factory("127.0.0.3")
+
+    class TwoAddressPolicy(_LoopbackControlPolicy):
+        def _has_builtin_denial(self, address):
+            if address == ipaddress.ip_address("127.0.0.3"):
+                return False
+            return super()._has_builtin_denial(address)
+
+    addresses = (
+        ["127.0.0.3", "127.0.0.2"] if denied_first else ["127.0.0.2", "127.0.0.3"]
+    )
+
+    def resolver(host, port):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))
+            for address in addresses
+        ]
+
+    client = SafeHttpClient(
+        fetch_policy=TwoAddressPolicy(deny_addresses=["127.0.0.3/32"]),
+        resolver=resolver,
+    )
+    with pytest.raises(FetchPolicyError):
+        client.get(f"http://mixed-denied.test:{allowed.server_port}/")
+    assert allowed.connections == 0
+    assert denied.connections == 0

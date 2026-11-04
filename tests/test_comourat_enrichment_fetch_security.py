@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 from comourat.collectors.paper_discoverer import PaperDiscovererCore
 from comourat.enrichment.enricher import EnrichmentAgent, create_enrichment_agent
@@ -260,3 +262,20 @@ def test_paper_discoverer_passes_fetch_dependencies(monkeypatch):
         "tool_call_rejection_buffer": 4,
         **dependencies,
     }
+
+
+def test_page_fetch_logs_redact_target_credentials_paths_and_queries(caplog):
+    session = MagicMock()
+    session.proxies = {}
+    session.get.side_effect = requests.ConnectionError(
+        "failed http://user:secret@example.com/generate?token=private"
+    )
+    fetcher = PageFetcher(http_session=session)
+    with caplog.at_level(logging.DEBUG):
+        fetcher.fetch("http://user:secret@example.com/generate?token=private")
+        fetcher.fetch("http://user:secret@example.com/generate?token=private")
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "secret" not in messages
+    assert "private" not in messages
+    assert "/generate" not in messages
+    assert "http://example.com" in messages

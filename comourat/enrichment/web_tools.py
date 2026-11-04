@@ -17,7 +17,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.tools import RunContext
 from trafilatura import extract
 
-from comourat.fetch import FetchPolicy, Resolver, SafeHttpClient
+from comourat.fetch import FetchPolicy, Resolver, SafeHttpClient, _redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -90,15 +90,15 @@ def attach_web_tools(
             )
             if content:
                 return content
-            return f"No extractable content found at {url}"
+            return f"No extractable content found at {_redact_url(url)}"
         except Exception as e:
-            return f"Error extracting {url}: {e}"
+            return f"Error extracting {_redact_url(url)}: {type(e).__name__}"
         finally:
             tool_time_total += time.monotonic() - t_tool
             agent._comourat_tool_time_total = tool_time_total  # type: ignore[attr-defined]
             logger.debug(
-                "extract_url '%s' | %.2fs (tool total %.2fs)",
-                url,
+                "extract_url %s | %.2fs (tool total %.2fs)",
+                _redact_url(url),
                 time.monotonic() - t_tool,
                 tool_time_total,
             )
@@ -120,6 +120,7 @@ def attach_web_tools(
                 data={"q": query},
                 headers={"User-Agent": DEFAULT_USER_AGENT},
             )
+            resp.raise_for_status()
             soup = BeautifulSoup(resp.text, "html.parser")
             links = soup.select("a.result-link")
             results = []
@@ -129,16 +130,15 @@ def attach_web_tools(
                 results.append(f"Title: {title}\nURL: {href}")
 
             if not results:
-                return f"No results found for query: {query}"
+                return "No results found for the web search"
             return "\n\n".join(results)
         except Exception as e:
-            return f"Error searching for '{query}': {e}"
+            return f"Error during web search: {type(e).__name__}"
         finally:
             tool_time_total += time.monotonic() - t_tool
             agent._comourat_tool_time_total = tool_time_total  # type: ignore[attr-defined]
             logger.debug(
-                "web_search '%s' | %.2fs (tool total %.2fs)",
-                query,
+                "web_search | %.2fs (tool total %.2fs)",
                 time.monotonic() - t_tool,
                 tool_time_total,
             )

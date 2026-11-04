@@ -18,6 +18,7 @@ Comourat is a library, not a pipeline runner. Callers create and configure the c
 ## Requirements
 
 - Python 3.12 or later.
+- Requests 2.32.0 or later and urllib3 2.x for protected fetching.
 
 ## Install from a checkout
 
@@ -102,7 +103,7 @@ Each top-level request has one monotonic overall deadline. The default is 30 sec
 
 The default redirect limit is 30 and automatic retries are disabled (`max_retries=0`). `PageFetcher(timeout=...)` remains available as an alias for configuring the default policy timeout. Do not pass `timeout` and `fetch_policy` together.
 
-`SafeHttpClient` raises `FetchPolicyError` for local policy denials, `FetchResolutionError` for resolution failures, and `FetchDeadlineExceeded` when the overall deadline expires. Proxy-enforced denials can appear as proxy or HTTP errors. No failure selects an unprotected direct or proxy fallback. Existing `PageFetcher` and enrichment-tool result contracts remain unchanged.
+`SafeHttpClient` raises `FetchPolicyError` for local policy denials, `FetchResolutionError` for resolution failures, and `FetchDeadlineExceeded` when the overall deadline expires. Proxy-enforced denials can appear as proxy or HTTP errors. No failure selects an unprotected direct or proxy fallback. Logs and client exceptions remove URL userinfo, paths, queries, and proxy credentials. Existing `PageFetcher` and enrichment-tool result contracts remain unchanged.
 
 ## Tests
 

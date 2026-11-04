@@ -26,18 +26,32 @@ class _LoopbackControlPolicy(FetchPolicy):
 class _TargetHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         self.server.requests_seen.append((self.path, self.headers.get("Host", "")))
+        self.server.headers_seen.append(dict(self.headers))
+        if self.path == "/redirect-final":
+            self.send_response(302)
+            self.send_header("Location", "/final")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            return
         if self.path == "/redirect-blocked":
             self.send_response(302)
             self.send_header("Location", self.server.redirect_target)
             self.send_header("Connection", "close")
             self.end_headers()
             return
-        body = b"SOCKS control content"
+        if self.path == "/article":
+            body = b"""<html><body><article><h1>SOCKS article</h1><p>Allowed SOCKS article content has enough text for extraction and validates the public entry point.</p></article></body></html>"""
+        elif self.path == "/search":
+            body = b'<html><body><a class="result-link" href="https://example.com">SOCKS result</a></body></html>'
+        else:
+            body = b"SOCKS control content"
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
+
+    do_POST = do_GET
 
     def log_message(self, *args):
         return
@@ -49,6 +63,7 @@ class _TargetServer(ThreadingHTTPServer):
     def __init__(self, address):
         self.connections = 0
         self.requests_seen = []
+        self.headers_seen = []
         super().__init__(address, _TargetHandler)
 
     def verify_request(self, request, client_address):
@@ -163,11 +178,18 @@ class _SOCKSServer(socketserver.ThreadingTCPServer):
 def servers():
     running = []
 
-    def start(server_class=_TargetServer, host="127.0.0.1", handler_class=None):
+    def start(
+        server_class=_TargetServer,
+        host="127.0.0.1",
+        handler_class=None,
+        tls_context=None,
+    ):
         if handler_class is None:
             server = server_class((host, 0))
         else:
             server = server_class((host, 0), handler_class)
+        if tls_context is not None:
+            server.socket = tls_context.wrap_socket(server.socket, server_side=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         running.append((server, thread))
@@ -294,4 +316,172 @@ def test_socks5_redirect_to_literal_denial_makes_no_second_proxy_request(servers
     with pytest.raises(FetchPolicyError):
         client.get(f"http://proxied.test:{allowed.server_port}/redirect-blocked")
     assert proxy.requests_seen == [(1, "127.0.0.2", allowed.server_port)]
+    assert prohibited.connections == 0
+
+
+def test_authenticated_socks_redirect_never_exposes_proxy_header_to_origin(servers):
+    target = servers(_TargetServer, "127.0.0.2")
+    proxy = servers(_SOCKSServer, handler_class=_SOCKS5Handler)
+    proxy.dns["proxied.test"] = "127.0.0.2"
+    calls = []
+    session = requests.Session()
+    session.headers["Proxy-Authorization"] = "Basic secret"
+    client = SafeHttpClient(
+        session,
+        fetch_policy=_LoopbackControlPolicy(),
+        proxy=f"socks5h://user:secret@proxy.test:{proxy.server_address[1]}",
+        resolver=_resolver(calls),
+    )
+    response = client.get(f"http://proxied.test:{target.server_port}/redirect-final")
+    assert response.status_code == 200
+    assert [path for path, _ in target.requests_seen] == [
+        "/redirect-final",
+        "/final",
+    ]
+    for headers in target.headers_seen:
+        assert "Proxy-Authorization" not in headers
+        assert "secret" not in str(headers)
+
+
+@pytest.mark.parametrize("scheme", ["socks5", "socks5h"])
+def test_https_through_socks_preserves_sni_and_certificate(
+    servers, tmp_path, tls_server_context, scheme
+):
+    tls_context, ca_path = tls_server_context(tmp_path, "proxied.test")
+    sni_names = []
+    tls_context.set_servername_callback(
+        lambda sock, name, context: sni_names.append(name)
+    )
+    target = servers(
+        _TargetServer,
+        "127.0.0.2",
+        tls_context=tls_context,
+    )
+    proxy = servers(_SOCKSServer, handler_class=_SOCKS5Handler)
+    proxy.dns["proxied.test"] = "127.0.0.2"
+    calls = []
+    session = requests.Session()
+    session.verify = ca_path
+    client = SafeHttpClient(
+        session,
+        fetch_policy=_LoopbackControlPolicy(),
+        proxy=f"{scheme}://proxy.test:{proxy.server_address[1]}",
+        resolver=_resolver(calls),
+    )
+    response = client.get(f"https://proxied.test:{target.server_port}/")
+    assert response.status_code == 200
+    assert response.content == b"SOCKS control content"
+    assert sni_names == ["proxied.test"]
+    expected_calls = (
+        ["proxy.test"] if scheme == "socks5h" else ["proxy.test", "proxied.test"]
+    )
+    assert calls == expected_calls
+
+
+@pytest.mark.parametrize("scheme", ["socks5", "socks5h"])
+def test_socks_allowed_redirect_control(servers, scheme):
+    target = servers(_TargetServer, "127.0.0.2")
+    proxy = servers(_SOCKSServer, handler_class=_SOCKS5Handler)
+    proxy.dns["proxied.test"] = "127.0.0.2"
+    calls = []
+    client = SafeHttpClient(
+        fetch_policy=_LoopbackControlPolicy(),
+        proxy=f"{scheme}://proxy.test:{proxy.server_address[1]}",
+        resolver=_resolver(calls),
+    )
+    response = client.get(f"http://proxied.test:{target.server_port}/redirect-final")
+    assert response.status_code == 200
+    assert [path for path, _ in target.requests_seen] == [
+        "/redirect-final",
+        "/final",
+    ]
+
+
+def _entry_succeeded(kind, result):
+    if kind == "search":
+        return "Title: SOCKS result" in result
+    return result is not None and "Allowed SOCKS article content" in result
+
+
+def _entry_failed(result):
+    return result is None or result.startswith("Error ")
+
+
+@pytest.mark.parametrize("kind", ["page", "extract", "search"])
+@pytest.mark.parametrize("scenario", ["direct", "redirect", "change"])
+@pytest.mark.parametrize("scheme", ["socks5", "socks5h"])
+def test_entry_point_security_through_socks(
+    servers, entry_point_factory, kind, scenario, scheme
+):
+    allowed = servers(_TargetServer, "127.0.0.2")
+    prohibited = servers(_TargetServer, "127.0.0.1")
+    proxy = servers(_SOCKSServer, handler_class=_SOCKS5Handler)
+    proxy.dns.update(
+        {
+            "proxied.test": "127.0.0.2",
+            "blocked.test": "127.0.0.1",
+            "changing.test": "127.0.0.2",
+        }
+    )
+    calls = []
+    if scenario == "change" and scheme == "socks5":
+        answers = iter(("127.0.0.1", "127.0.0.2", "127.0.0.1", "127.0.0.1"))
+
+        def resolver(host, port):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (next(answers), port))]
+
+    else:
+        resolver = _resolver(calls)
+    invoke = entry_point_factory(
+        kind,
+        fetch_policy=_LoopbackControlPolicy(),
+        proxy=f"{scheme}://proxy.test:{proxy.server_address[1]}",
+        resolver=resolver,
+    )
+    content_path = "/search" if kind == "search" else "/article"
+    if scenario == "direct":
+        result = invoke(f"http://127.0.0.1:{prohibited.server_port}{content_path}")
+        assert _entry_failed(result)
+        assert proxy.connections == 0
+    elif scenario == "redirect":
+        redirect_host = "blocked.test" if scheme == "socks5h" else "127.0.0.1"
+        allowed.redirect_target = (
+            f"http://{redirect_host}:{prohibited.server_port}{content_path}"
+        )
+        result = invoke(f"http://proxied.test:{allowed.server_port}/redirect-blocked")
+        assert _entry_failed(result)
+    else:
+        first = invoke(f"http://changing.test:{allowed.server_port}{content_path}")
+        assert _entry_succeeded(kind, first)
+        if scheme == "socks5h":
+            proxy.dns["changing.test"] = "127.0.0.1"
+        second = invoke(f"http://changing.test:{prohibited.server_port}{content_path}")
+        assert _entry_failed(second)
+    assert prohibited.connections == 0
+    assert prohibited.requests_seen == []
+
+
+@pytest.mark.parametrize("scheme", ["socks5", "socks4"])
+def test_local_socks_mixed_dns_answers_reject_before_proxy_connection(servers, scheme):
+    allowed = servers(_TargetServer, "127.0.0.2")
+    prohibited = servers(_TargetServer, "127.0.0.1")
+    proxy = servers(_SOCKSServer, handler_class=_SOCKS5Handler)
+
+    def resolver(host, port):
+        if host == "proxy.test":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.2", port)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
+        ]
+
+    client = SafeHttpClient(
+        fetch_policy=_LoopbackControlPolicy(),
+        proxy=f"{scheme}://proxy.test:{proxy.server_address[1]}",
+        resolver=resolver,
+    )
+    with pytest.raises(FetchPolicyError):
+        client.get(f"http://mixed.test:{allowed.server_port}/")
+    assert proxy.connections == 0
+    assert allowed.connections == 0
     assert prohibited.connections == 0

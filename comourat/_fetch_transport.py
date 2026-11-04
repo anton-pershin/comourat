@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import socket
+import ssl
 import time
 from dataclasses import dataclass
 
@@ -23,6 +24,11 @@ from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
 from urllib3.poolmanager import SSL_KEYWORDS
 from urllib3.util import parse_url
 from urllib3.util.retry import Retry
+from urllib3.util.ssl_ import (
+    create_urllib3_context,
+    resolve_cert_reqs,
+    resolve_ssl_version,
+)
 
 from comourat.fetch import (
     Clock,
@@ -35,6 +41,16 @@ from comourat.fetch import (
     _DeadlineExceeded,
     _Target,
 )
+
+
+def _contains_deadline_error(error: BaseException | None) -> bool:
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, _DeadlineExceeded):
+            return True
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return False
 
 
 class _DeadlineTimeout(Timeout):
@@ -62,8 +78,69 @@ class _DeadlineTimeout(Timeout):
             return 0
 
 
+class _DeadlineSSLContext:
+    """Delegate SSLContext behavior and register sockets before handshakes."""
+
+    def __init__(self, context, deadline: _Deadline) -> None:
+        object.__setattr__(self, "_context", context)
+        object.__setattr__(self, "_deadline", deadline)
+
+    def __getattr__(self, name):
+        return getattr(self._context, name)
+
+    def __setattr__(self, name, value) -> None:
+        if name in {"_context", "_deadline"}:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._context, name, value)
+
+    def wrap_socket(self, sock, *args, **kwargs):
+        do_handshake = kwargs.get("do_handshake_on_connect", True)
+        kwargs["do_handshake_on_connect"] = False
+        tls_socket = self._context.wrap_socket(sock, *args, **kwargs)
+        self._deadline.register(tls_socket)
+        if do_handshake:
+            tls_socket.do_handshake()
+        return tls_socket
+
+
+def _tls_context(pool_kwargs, deadline: _Deadline):
+    context = pool_kwargs.get("ssl_context")
+    if context is None:
+        context = create_urllib3_context(
+            ssl_version=resolve_ssl_version(pool_kwargs.get("ssl_version")),
+            ssl_minimum_version=pool_kwargs.get("ssl_minimum_version"),
+            ssl_maximum_version=pool_kwargs.get("ssl_maximum_version"),
+            cert_reqs=resolve_cert_reqs(pool_kwargs.get("cert_reqs")),
+        )
+    return _DeadlineSSLContext(context, deadline)
+
+
 class _DeadlineRetry(Retry):
     """Retry delays that consume the current overall deadline."""
+
+    @classmethod
+    def from_retry(cls, retry: Retry):
+        """Preserve Requests' retry settings in a deadline-aware copy."""
+        return cls(
+            total=retry.total,
+            connect=retry.connect,
+            read=retry.read,
+            redirect=retry.redirect,
+            status=retry.status,
+            other=retry.other,
+            allowed_methods=retry.allowed_methods,
+            status_forcelist=retry.status_forcelist,
+            backoff_factor=retry.backoff_factor,
+            backoff_max=retry.backoff_max,
+            retry_after_max=retry.retry_after_max,
+            raise_on_redirect=retry.raise_on_redirect,
+            raise_on_status=retry.raise_on_status,
+            history=retry.history,
+            remove_headers_on_redirect=retry.remove_headers_on_redirect,
+            respect_retry_after_header=retry.respect_retry_after_header,
+            backoff_jitter=retry.backoff_jitter,
+        )
 
     @staticmethod
     def _sleep(duration: float) -> None:
@@ -209,6 +286,7 @@ class _PinnedConnectionMixin:
                     proto,
                     deadline=self._comourat_deadline,
                 )
+                self._comourat_deadline.register(sock)
                 if self.socket_options:
                     for option in self.socket_options:
                         sock.setsockopt(*option)
@@ -216,7 +294,7 @@ class _PinnedConnectionMixin:
                     sock.bind(self.source_address)
                 sock.connect(sockaddr)
                 return sock
-            except (OSError, _DeadlineExceeded) as exc:
+            except (OSError, TypeError, UnicodeError, _DeadlineExceeded) as exc:
                 last_error = exc
                 if sock is not None:
                     sock.close()
@@ -319,6 +397,7 @@ class _PinnedSOCKSConnectionMixin(_PinnedConnectionMixin):
                         proxy_sockaddr=proxy_sockaddr,
                         deadline=self._comourat_deadline,
                     )
+                    self._comourat_deadline.register(sock)
                     if self.socket_options:
                         for option in self.socket_options:
                             sock.setsockopt(*option)
@@ -334,7 +413,13 @@ class _PinnedSOCKSConnectionMixin(_PinnedConnectionMixin):
                     )
                     sock.connect((target_host, target_port))
                     return sock
-                except (OSError, socks.ProxyError, _DeadlineExceeded) as exc:
+                except (
+                    OSError,
+                    TypeError,
+                    UnicodeError,
+                    socks.ProxyError,
+                    _DeadlineExceeded,
+                ) as exc:
                     last_error = exc
                     if sock is not None:
                         sock.close()
@@ -384,8 +469,10 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
         self.resolver = resolver
         self.clock = clock
         super().__init__(**kwargs)
-        if isinstance(self.max_retries, int) and not isinstance(self.max_retries, bool):
-            self.max_retries = _DeadlineRetry.from_int(self.max_retries)
+        if isinstance(self.max_retries, Retry) and not isinstance(
+            self.max_retries, _DeadlineRetry
+        ):
+            self.max_retries = _DeadlineRetry.from_retry(self.max_retries)
 
     def send(self, request, **kwargs):
         deadline = _current_deadline.get()
@@ -404,6 +491,11 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
                 proxy_answers = self.policy._resolve(
                     proxy_target, self.resolver, deadline, proxy=True
                 )
+                if proxy_target.scheme.startswith("socks"):
+                    # SOCKS credentials belong in the proxy handshake. Requests
+                    # can add a Basic header on plain-HTTP redirects; it must
+                    # never be forwarded through the tunnel to the origin.
+                    request.headers.pop("Proxy-Authorization", None)
                 proxy_state = _ProxyState(
                     target=proxy_target, answers=proxy_answers, url=proxy_url
                 )
@@ -435,9 +527,13 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
         except FetchPolicyError:
             raise
         except Exception as exc:
-            if deadline.expired() or isinstance(exc, _DeadlineExceeded):
+            if deadline.expired() or _contains_deadline_error(exc):
                 raise FetchDeadlineExceeded("overall fetch deadline exceeded") from exc
             raise
+
+    def get_connection(self, request, proxies=None):
+        """Fail closed on Requests versions without the TLS-context hook."""
+        raise FetchPolicyError("protected fetching requires Requests 2.32.0 or newer")
 
     def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
         _host_params, pool_kwargs = self.build_connection_pool_key_attributes(
@@ -451,6 +547,8 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
         if state.target.scheme == "http":
             for key in SSL_KEYWORDS:
                 pool_kwargs.pop(key, None)
+        else:
+            pool_kwargs["ssl_context"] = _tls_context(pool_kwargs, state.deadline)
         pool_class = (
             _PinnedHTTPSConnectionPool
             if state.target.scheme == "https"
@@ -477,6 +575,8 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
         if pool_scheme == "http":
             for key in SSL_KEYWORDS:
                 pool_kwargs.pop(key, None)
+        else:
+            pool_kwargs["ssl_context"] = _tls_context(pool_kwargs, state.deadline)
         pool_class = (
             _PinnedHTTPSConnectionPool
             if pool_scheme == "https"
@@ -503,6 +603,8 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
         if state.target.scheme == "http":
             for key in SSL_KEYWORDS:
                 pool_kwargs.pop(key, None)
+        else:
+            pool_kwargs["ssl_context"] = _tls_context(pool_kwargs, state.deadline)
         username, password = get_auth_from_url(proxy.url)
         socks_options = {
             "socks_version": (

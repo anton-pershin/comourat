@@ -7,7 +7,7 @@ import logging
 import requests
 from trafilatura import extract
 
-from comourat.fetch import FetchPolicy, Resolver, SafeHttpClient
+from comourat.fetch import FetchPolicy, Resolver, SafeHttpClient, _redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -73,10 +73,12 @@ class PageFetcher:
                 "configuration and network access: %s",
                 self._transport_failures,
                 self._requests,
-                exc,
+                type(exc).__name__,
             )
         else:
-            logger.debug("fetch failed for %s: %s", url, exc)
+            logger.debug(
+                "fetch failed for %s (%s)", _redact_url(url), type(exc).__name__
+            )
 
     def fetch(self, url: str) -> str | None:
         self._requests += 1
@@ -91,10 +93,14 @@ class PageFetcher:
             return None
         try:
             content = self.extractor(resp.text)
-        except Exception:
-            logger.exception("content extraction failed unexpectedly for %s", url)
+        except Exception as exc:
+            logger.error(
+                "content extraction failed for %s (%s)",
+                _redact_url(url),
+                type(exc).__name__,
+            )
             return None
         if not content:
-            logger.debug("fetch yielded no content for %s", url)
+            logger.debug("fetch yielded no content for %s", _redact_url(url))
             return None
         return content

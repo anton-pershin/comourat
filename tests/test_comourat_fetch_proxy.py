@@ -2,21 +2,15 @@
 
 from __future__ import annotations
 
-import datetime
 import http.client
 import select
 import socket
-import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 import requests
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import NameOID
 
 from comourat.fetch import FetchPolicy, FetchPolicyError, SafeHttpClient
 
@@ -24,18 +18,31 @@ from comourat.fetch import FetchPolicy, FetchPolicyError, SafeHttpClient
 class _TargetHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         self.server.requests_seen.append((self.path, self.headers.get("Host", "")))
+        if self.path == "/redirect-final":
+            self.send_response(302)
+            self.send_header("Location", "/final")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            return
         if self.path == "/redirect-blocked":
             self.send_response(302)
             self.send_header("Location", self.server.redirect_target)
             self.send_header("Connection", "close")
             self.end_headers()
             return
-        body = b"proxied control content"
+        if self.path == "/article":
+            body = b"""<html><body><article><h1>Proxy article</h1><p>Allowed proxy article content has enough text for extraction and validates the public entry point.</p></article></body></html>"""
+        elif self.path == "/search":
+            body = b'<html><body><a class="result-link" href="https://example.com">Proxy result</a></body></html>'
+        else:
+            body = b"proxied control content"
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
+
+    do_POST = do_GET
 
     def log_message(self, *args):
         return
@@ -67,7 +74,7 @@ class _ForwardProxyHandler(BaseHTTPRequestHandler):
             return None
         return answers[0]
 
-    def do_GET(self):  # noqa: N802
+    def _handle_request(self):
         self.server.requests_seen.append(self.path)
         parsed = urlsplit(self.path)
         target_ip = self._target_address(parsed.hostname)
@@ -78,7 +85,9 @@ class _ForwardProxyHandler(BaseHTTPRequestHandler):
         connection = http.client.HTTPConnection(target_ip, parsed.port or 80, timeout=2)
         headers = dict(self.headers)
         headers["Host"] = parsed.netloc
-        connection.request("GET", path, headers=headers)
+        content_length = int(self.headers.get("Content-Length", "0"))
+        request_body = self.rfile.read(content_length) if content_length else None
+        connection.request(self.command, path, body=request_body, headers=headers)
         response = connection.getresponse()
         body = response.read()
         self.send_response(response.status)
@@ -89,6 +98,9 @@ class _ForwardProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
         connection.close()
+
+    do_GET = _handle_request
+    do_POST = _handle_request
 
     def do_CONNECT(self):  # noqa: N802
         self.server.connect_requests.append(self.path)
@@ -167,39 +179,6 @@ def _proxy_client(proxy, resolver, policy=None, scheme="http", session=None):
     )
 
 
-def _tls_server_context(tmp_path, hostname):
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
-    now = datetime.datetime.now(datetime.UTC)
-    certificate = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(subject)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - datetime.timedelta(minutes=1))
-        .not_valid_after(now + datetime.timedelta(days=1))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False
-        )
-        .sign(key, hashes.SHA256())
-    )
-    certificate_path = tmp_path / f"{hostname}.crt"
-    key_path = tmp_path / f"{hostname}.key"
-    certificate_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
-    key_path.write_bytes(
-        key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.NoEncryption(),
-        )
-    )
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(certificate_path, key_path)
-    return context, str(certificate_path)
-
-
 def test_http_forward_proxy_receives_hostname_without_local_target_dns(proxy_servers):
     target = proxy_servers(_TargetServer, "127.0.0.2")
     proxy = proxy_servers(_ForwardProxyServer)
@@ -214,7 +193,7 @@ def test_http_forward_proxy_receives_hostname_without_local_target_dns(proxy_ser
     client = _proxy_client(proxy, resolver)
     response = client.get(f"http://proxied.test:{target.server_port}/article")
     assert response.status_code == 200
-    assert response.content == b"proxied control content"
+    assert b"Allowed proxy article content" in response.content
     assert resolver_calls == ["proxy.test"]
     assert proxy.requests_seen == [f"http://proxied.test:{target.server_port}/article"]
     assert target.requests_seen == [("/article", f"proxied.test:{target.server_port}")]
@@ -265,8 +244,10 @@ def test_caller_denial_of_proxy_endpoint_prevents_connection(proxy_servers):
     assert proxy.connections == 0
 
 
-def test_http_connect_preserves_hostname_sni_and_certificate(proxy_servers, tmp_path):
-    tls_context, ca_path = _tls_server_context(tmp_path, "proxied.test")
+def test_http_connect_preserves_hostname_sni_and_certificate(
+    proxy_servers, tmp_path, tls_server_context
+):
+    tls_context, ca_path = tls_server_context(tmp_path, "proxied.test")
     sni_names = []
     tls_context.set_servername_callback(
         lambda sock, name, context: sni_names.append(name)
@@ -308,8 +289,10 @@ def test_policy_enforcing_connect_proxy_blocks_remote_target(proxy_servers):
     assert target.connections == 0
 
 
-def test_https_proxy_identity_and_forwarded_http_request(proxy_servers, tmp_path):
-    tls_context, ca_path = _tls_server_context(tmp_path, "proxy.test")
+def test_https_proxy_identity_and_forwarded_http_request(
+    proxy_servers, tmp_path, tls_server_context
+):
+    tls_context, ca_path = tls_server_context(tmp_path, "proxy.test")
     sni_names = []
     tls_context.set_servername_callback(
         lambda sock, name, context: sni_names.append(name)
@@ -407,10 +390,10 @@ def test_proxy_policy_error_does_not_expose_proxy_credentials(proxy_servers):
 
 
 def test_https_target_through_https_proxy_verifies_both_identities(
-    proxy_servers, tmp_path
+    proxy_servers, tmp_path, tls_server_context
 ):
-    target_context, target_ca = _tls_server_context(tmp_path, "proxied.test")
-    proxy_context, proxy_ca = _tls_server_context(tmp_path, "proxy.test")
+    target_context, target_ca = tls_server_context(tmp_path, "proxied.test")
+    proxy_context, proxy_ca = tls_server_context(tmp_path, "proxy.test")
     target_sni = []
     proxy_sni = []
     target_context.set_servername_callback(
@@ -440,3 +423,111 @@ def test_https_target_through_https_proxy_verifies_both_identities(
     assert response.content == b"proxied control content"
     assert proxy_sni == ["proxy.test"]
     assert target_sni == ["proxied.test"]
+
+
+def test_policy_enforcing_proxy_handles_resolution_change(proxy_servers):
+    allowed = proxy_servers(_TargetServer, "127.0.0.2")
+    prohibited = proxy_servers(_TargetServer, "127.0.0.1")
+    proxy = proxy_servers(_ForwardProxyServer)
+    proxy.dns["changing.test"] = "127.0.0.2"
+
+    def resolver(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+    client = _proxy_client(proxy, resolver)
+    first = client.get(f"http://changing.test:{allowed.server_port}/")
+    assert first.status_code == 200
+    proxy.dns["changing.test"] = "127.0.0.1"
+    second = client.get(f"http://changing.test:{prohibited.server_port}/")
+    assert second.status_code == 502
+    assert prohibited.connections == 0
+
+
+def test_policy_enforcing_proxy_applies_caller_specific_cidr_denial(proxy_servers):
+    target = proxy_servers(_TargetServer, "127.0.0.2")
+    proxy = proxy_servers(_ForwardProxyServer)
+    proxy.dns["denied.test"] = "127.0.0.2"
+    proxy.allowed_target_ips = set()
+    policy = FetchPolicy(deny_addresses=["127.0.0.2/32"])
+
+    def resolver(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+    client = _proxy_client(proxy, resolver, policy=policy)
+    response = client.get(f"http://denied.test:{target.server_port}/")
+    assert response.status_code == 502
+    assert target.connections == 0
+
+
+def test_http_proxy_allowed_redirect_control(proxy_servers):
+    target = proxy_servers(_TargetServer, "127.0.0.2")
+    proxy = proxy_servers(_ForwardProxyServer)
+    proxy.dns["proxied.test"] = "127.0.0.2"
+
+    def resolver(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+    client = _proxy_client(proxy, resolver)
+    response = client.get(f"http://proxied.test:{target.server_port}/redirect-final")
+    assert response.status_code == 200
+    assert [path for path, _ in target.requests_seen] == [
+        "/redirect-final",
+        "/final",
+    ]
+
+
+def _entry_succeeded(kind, result):
+    if kind == "search":
+        return "Title: Proxy result" in result
+    return result is not None and "Allowed proxy article content" in result
+
+
+def _entry_failed(result):
+    return result is None or result.startswith("Error ")
+
+
+@pytest.mark.parametrize("kind", ["page", "extract", "search"])
+@pytest.mark.parametrize("scenario", ["direct", "redirect", "change"])
+def test_entry_point_security_through_http_proxy(
+    proxy_servers, entry_point_factory, kind, scenario
+):
+    allowed = proxy_servers(_TargetServer, "127.0.0.2")
+    prohibited = proxy_servers(_TargetServer, "127.0.0.1")
+    proxy = proxy_servers(_ForwardProxyServer)
+    proxy.dns.update(
+        {
+            "proxied.test": "127.0.0.2",
+            "blocked.test": "127.0.0.1",
+            "changing.test": "127.0.0.2",
+        }
+    )
+
+    def resolver(host, port):
+        assert host == "proxy.test"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+    invoke = entry_point_factory(
+        kind,
+        fetch_policy=FetchPolicy(),
+        proxy=f"http://proxy.test:{proxy.server_port}",
+        resolver=resolver,
+    )
+    content_path = "/search" if kind == "search" else "/article"
+    if scenario == "direct":
+        result = invoke(f"http://127.0.0.1:{prohibited.server_port}{content_path}")
+        assert _entry_failed(result)
+        assert proxy.connections == 0
+    elif scenario == "redirect":
+        allowed.redirect_target = (
+            f"http://blocked.test:{prohibited.server_port}{content_path}"
+        )
+        result = invoke(f"http://proxied.test:{allowed.server_port}/redirect-blocked")
+        assert _entry_failed(result)
+    else:
+        first = invoke(f"http://changing.test:{allowed.server_port}{content_path}")
+        assert _entry_succeeded(kind, first)
+        proxy.dns["changing.test"] = "127.0.0.1"
+        second = invoke(f"http://changing.test:{prohibited.server_port}{content_path}")
+        assert _entry_failed(second)
+    assert prohibited.connections == 0
+    assert prohibited.requests_seen == []
