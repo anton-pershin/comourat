@@ -7,7 +7,7 @@ import logging
 import requests
 from trafilatura import extract
 
-from comourat.proxy import ProxyConfigurationError, validate_proxy_url
+from comourat.fetch import FetchPolicy, Resolver, SafeHttpClient
 
 logger = logging.getLogger(__name__)
 
@@ -35,15 +35,25 @@ class PageFetcher:
         self,
         http_session=None,
         proxy: str | None = None,
-        timeout: int = 30,
+        timeout: float | None = None,
         extractor=extract_main_content,
+        fetch_policy: FetchPolicy | None = None,
+        resolver: Resolver | None = None,
     ) -> None:
-        self.session = http_session if http_session is not None else requests.Session()
-        if proxy:
-            validated = validate_proxy_url(proxy)
-            self.session.proxies.update({"http": validated, "https": validated})
-        self.proxy = proxy
-        self.timeout = timeout
+        if fetch_policy is not None and timeout is not None:
+            raise ValueError("pass either timeout or fetch_policy, not both")
+        policy = fetch_policy or FetchPolicy(
+            overall_timeout=30 if timeout is None else timeout
+        )
+        self.http_client = SafeHttpClient(
+            http_session,
+            fetch_policy=policy,
+            proxy=proxy,
+            resolver=resolver,
+        )
+        self.session = self.http_client.session
+        self.proxy = self.http_client.proxy
+        self.timeout = policy.overall_timeout
         self.extractor = extractor
         self._transport_failures = 0
         self._requests = 0
@@ -71,9 +81,8 @@ class PageFetcher:
     def fetch(self, url: str) -> str | None:
         self._requests += 1
         try:
-            resp = self.session.get(
+            resp = self.http_client.get(
                 url,
-                timeout=self.timeout,
                 headers={"User-Agent": DEFAULT_USER_AGENT},
             )
             resp.raise_for_status()

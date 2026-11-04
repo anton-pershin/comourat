@@ -16,6 +16,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
 from comourat.enrichment.web_tools import attach_web_tools
+from comourat.fetch import FetchPolicy, Resolver
 from comourat.models import EnrichmentResult
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,10 @@ def create_enrichment_agent(
     model_settings: dict | None = None,
     retries: int | None = None,
     tool_call_rejection_buffer: int = 4,
+    http_session=None,
+    proxy: str | None = None,
+    fetch_policy: FetchPolicy | None = None,
+    resolver: Resolver | None = None,
 ) -> Agent:
     """Create an enrichment agent with URL extraction and web search tools."""
     agent = Agent(
@@ -56,7 +61,12 @@ def create_enrichment_agent(
         deps_type=dict,
     )
     return attach_web_tools(
-        agent, tool_call_rejection_buffer=tool_call_rejection_buffer
+        agent,
+        tool_call_rejection_buffer=tool_call_rejection_buffer,
+        http_session=http_session,
+        proxy=proxy,
+        fetch_policy=fetch_policy,
+        resolver=resolver,
     )
 
 
@@ -72,6 +82,10 @@ class EnrichmentAgent:
         request_limit: int = 20,
         tool_calls_limit: int = 10,
         tool_call_rejection_buffer: int = 4,
+        http_session=None,
+        proxy: str | None = None,
+        fetch_policy: FetchPolicy | None = None,
+        resolver: Resolver | None = None,
     ) -> None:
         self.agent = create_enrichment_agent(
             model,
@@ -79,6 +93,10 @@ class EnrichmentAgent:
             model_settings=model_settings,
             retries=retries,
             tool_call_rejection_buffer=tool_call_rejection_buffer,
+            http_session=http_session,
+            proxy=proxy,
+            fetch_policy=fetch_policy,
+            resolver=resolver,
         )
         self.request_limit = request_limit
         self.tool_calls_limit = tool_calls_limit

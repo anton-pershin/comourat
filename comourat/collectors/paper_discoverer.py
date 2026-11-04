@@ -11,6 +11,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
 from comourat.enrichment.web_tools import attach_web_tools
+from comourat.fetch import FetchPolicy, Resolver
 from comourat.models import PaperCandidateCollection
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,10 @@ class PaperDiscovererCore:
         request_limit: int = 30,
         tool_calls_limit: int = 15,
         tool_call_rejection_buffer: int = 4,
+        http_session=None,
+        proxy: str | None = None,
+        fetch_policy: FetchPolicy | None = None,
+        resolver: Resolver | None = None,
     ) -> None:
         self.attribute_description = attribute_description
         self.constraints_description = constraints_description
@@ -77,7 +82,12 @@ class PaperDiscovererCore:
             deps_type=dict,
         )
         attach_web_tools(
-            self.agent, tool_call_rejection_buffer=tool_call_rejection_buffer
+            self.agent,
+            tool_call_rejection_buffer=tool_call_rejection_buffer,
+            http_session=http_session,
+            proxy=proxy,
+            fetch_policy=fetch_policy,
+            resolver=resolver,
         )
 
         self.request_limit = request_limit
