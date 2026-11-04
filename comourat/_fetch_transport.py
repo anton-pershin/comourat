@@ -533,16 +533,19 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
 
     def get_connection(self, request, *args, **kwargs):
         """Fail closed on Requests versions without the TLS-context hook."""
-        raise FetchPolicyError("protected fetching requires Requests 2.32.2 or newer")
+        raise FetchPolicyError("protected fetching requires Requests 2.32.3 or newer")
 
     def _get_connection(self, request, *args, **kwargs):
         """Fail closed on Requests 2.32.0 and 2.32.1."""
-        raise FetchPolicyError("protected fetching requires Requests 2.32.2 or newer")
+        raise FetchPolicyError("protected fetching requires Requests 2.32.3 or newer")
 
     def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
-        _host_params, pool_kwargs = self.build_connection_pool_key_attributes(
-            request, verify, cert
-        )
+        builder = getattr(self, "build_connection_pool_key_attributes", None)
+        if builder is None:
+            raise FetchPolicyError(
+                "protected fetching requires Requests 2.32.3 or newer"
+            )
+        _host_params, pool_kwargs = builder(request, verify, cert)
         state = request._comourat_fetch_state
         if state.proxy and state.proxy.target.scheme in {"http", "https"}:
             return self._http_proxy_pool(state, pool_kwargs)
@@ -640,24 +643,31 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
             **pool_kwargs,
         )
 
+    @staticmethod
+    def _configure_context_trust(context, conn) -> None:
+        if conn.cert_reqs == "CERT_NONE":
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            return
+        # urllib3 ignores pool CA settings for an explicit proxy context, and
+        # Requests can supply no CA attributes for a default target.
+        # Initialize both fresh contexts explicitly in every case.
+        if getattr(conn, "ca_certs", None):
+            context.load_verify_locations(conn.ca_certs)
+        elif getattr(conn, "ca_cert_dir", None):
+            context.load_verify_locations(capath=conn.ca_cert_dir)
+        else:
+            context.load_verify_locations(requests.adapters.DEFAULT_CA_BUNDLE_PATH)
+        context.verify_mode = ssl.CERT_REQUIRED
+
     def cert_verify(self, conn, url, verify, cert) -> None:
         super().cert_verify(
             conn, getattr(conn, "_comourat_cert_url", url), verify, cert
         )
+        target_context = getattr(conn, "conn_kw", {}).get("ssl_context")
+        if target_context is not None:
+            self._configure_context_trust(target_context, conn)
         proxy_config = getattr(conn, "proxy_config", None)
         proxy_context = getattr(proxy_config, "ssl_context", None)
-        if proxy_context is None:
-            return
-        # urllib3 ignores pool CA settings when an explicit proxy context is
-        # present. Apply the same caller-provided trust policy to the proxy.
-        if conn.cert_reqs == "CERT_NONE":
-            proxy_context.check_hostname = False
-            proxy_context.verify_mode = ssl.CERT_NONE
-            return
-        if getattr(conn, "ca_certs", None):
-            proxy_context.load_verify_locations(conn.ca_certs)
-        elif getattr(conn, "ca_cert_dir", None):
-            proxy_context.load_verify_locations(capath=conn.ca_cert_dir)
-        else:
-            proxy_context.load_default_certs()
-        proxy_context.verify_mode = ssl.CERT_REQUIRED
+        if proxy_context is not None and proxy_context is not target_context:
+            self._configure_context_trust(proxy_context, conn)

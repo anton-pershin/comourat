@@ -501,10 +501,13 @@ def test_production_adapter_uses_deadline_retry_and_fails_closed_on_old_hook():
     client = SafeHttpClient(fetch_policy=FetchPolicy(max_retries=2))
     adapter = client.session.get_adapter("http://example.com")
     assert isinstance(adapter.max_retries, _DeadlineRetry)
-    with pytest.raises(FetchPolicyError, match="2.32.2"):
+    with pytest.raises(FetchPolicyError, match="2.32.3"):
         adapter.get_connection(MagicMock())
-    with pytest.raises(FetchPolicyError, match="2.32.2"):
+    with pytest.raises(FetchPolicyError, match="2.32.3"):
         adapter._get_connection(MagicMock(), True, proxies={}, cert=None)
+    adapter.build_connection_pool_key_attributes = None
+    with pytest.raises(FetchPolicyError, match="2.32.3"):
+        adapter.get_connection_with_tls_context(MagicMock(), True)
 
 
 def test_transport_exception_urls_are_redacted():

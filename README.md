@@ -18,7 +18,7 @@ Comourat is a library, not a pipeline runner. Callers create and configure the c
 ## Requirements
 
 - Python 3.12 or later.
-- Requests 2.32.2 or later and urllib3 2.x for protected fetching.
+- Requests 2.32.3 or later and urllib3 2.x for protected fetching.
 
 ## Install from a checkout
 

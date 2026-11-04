@@ -13,7 +13,7 @@ dependencies = [
   "feedparser",
   "httpx",
   "idna",
-  "requests >= 2.32.2",
+  "requests >= 2.32.3",
   "urllib3 >= 2.0",
   "PySocks",  # SOCKS proxies need it; requests reports a missing import
   "beautifulsoup4",

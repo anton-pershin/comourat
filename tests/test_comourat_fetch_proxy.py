@@ -8,6 +8,7 @@ import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
@@ -17,6 +18,7 @@ from comourat._fetch_transport import (
     _DeadlineSSLContext,
     _ProxyState,
     _RequestState,
+    _tls_context,
 )
 from comourat.fetch import FetchPolicy, FetchPolicyError, SafeHttpClient, _Deadline
 
@@ -569,5 +571,22 @@ def test_https_tunnel_uses_separate_deadline_proxy_and_target_contexts():
         assert pool.proxy_config.ssl_context is not target_context
         assert pool.proxy_config.ssl_context._context is not target_context._context
         pool.close()
+    finally:
+        deadline.close()
+
+
+def test_default_target_context_loads_requests_ca_bundle_without_pool_ca_attrs():
+    client = SafeHttpClient()
+    adapter = client.session.get_adapter("https://example.com")
+    deadline = _Deadline.start(1, time.monotonic)
+    context = _tls_context({}, deadline)
+    connection = SimpleNamespace(
+        cert_reqs="CERT_REQUIRED",
+        ca_certs=None,
+        ca_cert_dir=None,
+    )
+    try:
+        adapter._configure_context_trust(context, connection)
+        assert len(context._context.get_ca_certs()) > 0
     finally:
         deadline.close()
