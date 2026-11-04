@@ -154,10 +154,15 @@ def _redact_url(url: str) -> str:
 
 
 def _redact_urls_in_text(text: str) -> str:
-    return re.sub(
+    redacted = re.sub(
         r"https?://[^\s'\"<>]+",
         lambda match: _redact_url(match.group(0)),
         text,
+    )
+    return re.sub(
+        r"(?i)(\burl\s*[:=]\s*['\"]?)/[^\s'\"<>]+",
+        r"\1<redacted>",
+        redacted,
     )
 
 

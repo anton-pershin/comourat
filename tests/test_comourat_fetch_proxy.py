@@ -6,13 +6,19 @@ import http.client
 import select
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 import requests
 
-from comourat.fetch import FetchPolicy, FetchPolicyError, SafeHttpClient
+from comourat._fetch_transport import (
+    _DeadlineSSLContext,
+    _ProxyState,
+    _RequestState,
+)
+from comourat.fetch import FetchPolicy, FetchPolicyError, SafeHttpClient, _Deadline
 
 
 class _TargetHandler(BaseHTTPRequestHandler):
@@ -531,3 +537,36 @@ def test_entry_point_security_through_http_proxy(
         assert _entry_failed(second)
     assert prohibited.connections == 0
     assert prohibited.requests_seen == []
+
+
+def test_https_tunnel_uses_separate_deadline_proxy_and_target_contexts():
+    client = SafeHttpClient(proxy="https://127.0.0.1:4443")
+    adapter = client.session.get_adapter("https://example.com")
+    deadline = _Deadline.start(1, time.monotonic)
+    target = client.policy._parse_target("https://93.184.216.34")
+    proxy_target = client.policy._parse_target(
+        "https://127.0.0.1:4443",
+        allowed_schemes=("http", "https"),
+        proxy=True,
+    )
+    state = _RequestState(
+        target=target,
+        target_answers=client.policy._resolve(target, client.resolver, deadline),
+        deadline=deadline,
+        proxy=_ProxyState(
+            target=proxy_target,
+            answers=client.policy._resolve(
+                proxy_target, client.resolver, deadline, proxy=True
+            ),
+            url="https://127.0.0.1:4443",
+        ),
+    )
+    try:
+        pool = adapter._http_proxy_pool(state, {"cert_reqs": "CERT_REQUIRED"})
+        target_context = pool.conn_kw["ssl_context"]
+        assert isinstance(target_context, _DeadlineSSLContext)
+        assert isinstance(pool.proxy_config.ssl_context, _DeadlineSSLContext)
+        assert pool.proxy_config.ssl_context is not target_context
+        pool.close()
+    finally:
+        deadline.close()

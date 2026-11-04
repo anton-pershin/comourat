@@ -501,8 +501,10 @@ def test_production_adapter_uses_deadline_retry_and_fails_closed_on_old_hook():
     client = SafeHttpClient(fetch_policy=FetchPolicy(max_retries=2))
     adapter = client.session.get_adapter("http://example.com")
     assert isinstance(adapter.max_retries, _DeadlineRetry)
-    with pytest.raises(FetchPolicyError, match="2.32.0"):
+    with pytest.raises(FetchPolicyError, match="2.32.2"):
         adapter.get_connection(MagicMock())
+    with pytest.raises(FetchPolicyError, match="2.32.2"):
+        adapter._get_connection(MagicMock(), True, proxies={}, cert=None)
 
 
 def test_transport_exception_urls_are_redacted():
@@ -552,3 +554,23 @@ def test_caller_denied_mixed_answers_reject_entire_set_in_any_order(
         client.get(f"http://mixed-denied.test:{allowed.server_port}/")
     assert allowed.connections == 0
     assert denied.connections == 0
+
+
+def test_real_connection_error_redacts_path_only_urls():
+    probe = socket.socket()
+    probe.bind(("127.0.0.3", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+
+    class RefusedControlPolicy(_LoopbackControlPolicy):
+        def _has_builtin_denial(self, address):
+            if address == ipaddress.ip_address("127.0.0.3"):
+                return False
+            return super()._has_builtin_denial(address)
+
+    client = SafeHttpClient(fetch_policy=RefusedControlPolicy(max_retries=0))
+    with pytest.raises(requests.ConnectionError) as error:
+        client.get(f"http://127.0.0.3:{port}/private/path?token=sensitive")
+    message = str(error.value)
+    assert "sensitive" not in message
+    assert "/private/path" not in message

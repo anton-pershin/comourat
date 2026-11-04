@@ -531,9 +531,13 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
                 raise FetchDeadlineExceeded("overall fetch deadline exceeded") from exc
             raise
 
-    def get_connection(self, request, proxies=None):
+    def get_connection(self, request, *args, **kwargs):
         """Fail closed on Requests versions without the TLS-context hook."""
-        raise FetchPolicyError("protected fetching requires Requests 2.32.0 or newer")
+        raise FetchPolicyError("protected fetching requires Requests 2.32.2 or newer")
+
+    def _get_connection(self, request, *args, **kwargs):
+        """Fail closed on Requests 2.32.0 and 2.32.1."""
+        raise FetchPolicyError("protected fetching requires Requests 2.32.2 or newer")
 
     def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
         _host_params, pool_kwargs = self.build_connection_pool_key_attributes(
@@ -572,10 +576,13 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
         pool_port = (
             state.target.port if state.target.scheme == "https" else proxy.target.port
         )
+        proxy_ssl_context = None
         if pool_scheme == "http":
             for key in SSL_KEYWORDS:
                 pool_kwargs.pop(key, None)
         else:
+            if proxy.target.scheme == "https":
+                proxy_ssl_context = _tls_context(pool_kwargs, state.deadline)
             pool_kwargs["ssl_context"] = _tls_context(pool_kwargs, state.deadline)
         pool_class = (
             _PinnedHTTPSConnectionPool
@@ -590,7 +597,7 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
             deadline=state.deadline,
             _proxy=parsed_proxy,
             _proxy_headers=self.proxy_headers(proxy.url),
-            _proxy_config=ProxyConfig(None, False, None, None),
+            _proxy_config=ProxyConfig(proxy_ssl_context, False, None, None),
             **pool_kwargs,
         )
         if state.target.scheme == "http" and proxy.target.scheme == "https":
@@ -637,3 +644,20 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
         super().cert_verify(
             conn, getattr(conn, "_comourat_cert_url", url), verify, cert
         )
+        proxy_config = getattr(conn, "proxy_config", None)
+        proxy_context = getattr(proxy_config, "ssl_context", None)
+        if proxy_context is None:
+            return
+        # urllib3 ignores pool CA settings when an explicit proxy context is
+        # present. Apply the same caller-provided trust policy to the proxy.
+        if conn.cert_reqs == "CERT_NONE":
+            proxy_context.check_hostname = False
+            proxy_context.verify_mode = ssl.CERT_NONE
+            return
+        if getattr(conn, "ca_certs", None):
+            proxy_context.load_verify_locations(conn.ca_certs)
+        elif getattr(conn, "ca_cert_dir", None):
+            proxy_context.load_verify_locations(capath=conn.ca_cert_dir)
+        else:
+            proxy_context.load_default_certs()
+        proxy_context.verify_mode = ssl.CERT_REQUIRED

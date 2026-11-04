@@ -278,6 +278,42 @@ def test_watchdog_interrupts_blocking_socket_receive():
         right.close()
 
 
+def test_watchdog_stops_even_with_continuous_socket_progress():
+    left, right = socket.socketpair()
+    stop = threading.Event()
+
+    def write_progress():
+        while not stop.is_set():
+            try:
+                right.send(b"x")
+            except OSError:
+                return
+            stop.wait(0.01)
+
+    writer = threading.Thread(target=write_progress, daemon=True)
+    writer.start()
+    deadline = _Deadline.start(0.06, time.monotonic)
+    deadline.register(left)
+    started = time.monotonic()
+    reads = 0
+    try:
+        while True:
+            try:
+                if not left.recv(1):
+                    break
+                reads += 1
+            except OSError:
+                break
+        assert time.monotonic() - started < 0.5
+        assert reads < 50
+    finally:
+        stop.set()
+        deadline.close()
+        left.close()
+        right.close()
+        writer.join(timeout=1)
+
+
 def test_ssl_context_registers_socket_before_handshake():
     events = []
 
