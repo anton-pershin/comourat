@@ -105,14 +105,14 @@ class _DeadlineSSLContext:
 
 
 def _tls_context(pool_kwargs, deadline: _Deadline):
-    context = pool_kwargs.get("ssl_context")
-    if context is None:
-        context = create_urllib3_context(
-            ssl_version=resolve_ssl_version(pool_kwargs.get("ssl_version")),
-            ssl_minimum_version=pool_kwargs.get("ssl_minimum_version"),
-            ssl_maximum_version=pool_kwargs.get("ssl_maximum_version"),
-            cert_reqs=resolve_cert_reqs(pool_kwargs.get("cert_reqs")),
-        )
+    # Requests reuses a process-global preloaded SSLContext. Never wrap or
+    # mutate it: each target and proxy needs independent trust state.
+    context = create_urllib3_context(
+        ssl_version=resolve_ssl_version(pool_kwargs.get("ssl_version")),
+        ssl_minimum_version=pool_kwargs.get("ssl_minimum_version"),
+        ssl_maximum_version=pool_kwargs.get("ssl_maximum_version"),
+        cert_reqs=resolve_cert_reqs(pool_kwargs.get("cert_reqs")),
+    )
     return _DeadlineSSLContext(context, deadline)
 
 

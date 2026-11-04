@@ -567,6 +567,7 @@ def test_https_tunnel_uses_separate_deadline_proxy_and_target_contexts():
         assert isinstance(target_context, _DeadlineSSLContext)
         assert isinstance(pool.proxy_config.ssl_context, _DeadlineSSLContext)
         assert pool.proxy_config.ssl_context is not target_context
+        assert pool.proxy_config.ssl_context._context is not target_context._context
         pool.close()
     finally:
         deadline.close()
