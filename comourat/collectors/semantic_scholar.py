@@ -61,7 +61,7 @@ class SemanticScholarPaperCollectorCore:
         output = PaperInfoCollection(papers=[])
 
         n_papers_processed = 0
-        request_data = {
+        request_data: dict[str, Any] = {
             "query": self.strict_keyword_query,
         }
         next_offset: int | None = None

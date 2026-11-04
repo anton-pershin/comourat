@@ -8,6 +8,7 @@ two stored scores are comparable regardless of which measure produced them.
 """
 
 import logging
+import math
 import time
 from datetime import date
 
@@ -81,7 +82,7 @@ class CitationInfluenceAssessor:
         cited_by_count / years since publication.
         """
         fwci = getattr(item, "influence_fwci", None)
-        if isinstance(fwci, (int, float)) and fwci == fwci:  # rules out NaN
+        if isinstance(fwci, (int, float)) and not math.isnan(fwci):
             return (
                 round(_interpolate(float(fwci), self.fwci_breakpoints)),
                 MEASURE_FWCI,

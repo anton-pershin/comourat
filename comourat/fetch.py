@@ -1,5 +1,8 @@
 """Policy-controlled HTTP fetching with explicit DNS and proxy boundaries."""
 
+# Internal policy methods are shared with the package transport module.
+# pylint: disable=protected-access,cyclic-import
+
 from __future__ import annotations
 
 import contextvars
@@ -416,7 +419,8 @@ class FetchPolicy:
             try:
                 answers = tuple(resolver(target.host, target.port))
                 results.put((True, answers))
-            except BaseException as exc:  # returned to the requesting thread
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                # Return resolver failures to the requesting thread.
                 results.put((False, exc))
 
         thread = threading.Thread(target=resolve_worker, daemon=True)
@@ -449,7 +453,9 @@ class SafeHttpClient:
         resolver: Resolver | None = None,
         clock: Clock | None = None,
     ) -> None:
-        from comourat._fetch_transport import _SafeHTTPAdapter
+        from comourat._fetch_transport import (  # pylint: disable=import-outside-toplevel
+            _SafeHTTPAdapter,
+        )
 
         self.policy = fetch_policy or FetchPolicy()
         self.session = http_session if http_session is not None else requests.Session()

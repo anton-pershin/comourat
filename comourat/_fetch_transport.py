@@ -1,5 +1,8 @@
 """Internal Requests/urllib3 transport for protected fetching."""
 
+# This module intentionally integrates with Requests/urllib3 internal hooks.
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import http.client
@@ -333,9 +336,9 @@ class _PinnedSocksSocket(socks.socksocket):
     def _proxy_addr(self):
         return self._proxy_sockaddr
 
-    def connect(self, address):
+    def connect(self, dest_pair, catch_errors=None):
         self._refresh()
-        result = super().connect(address)
+        result = super().connect(dest_pair, catch_errors)
         self._refresh()
         return result
 
@@ -355,8 +358,8 @@ class _PinnedSocksSocket(socks.socksocket):
         self._refresh()
         return super().recv_into(*args, **kwargs)
 
-    def makefile(self, mode="r", buffering=None, *args, **kwargs):
-        wrapped = super().makefile(mode, buffering, *args, **kwargs)
+    def makefile(self, mode="r", buffering=None, **kwargs):
+        wrapped = super().makefile(mode, buffering, **kwargs)
         if "r" in mode:
             return _DeadlineReader(wrapped, self, self._comourat_deadline)
         return wrapped
@@ -434,7 +437,9 @@ class _PinnedSOCKSConnection(_PinnedSOCKSConnectionMixin, SOCKSConnection):
     pass
 
 
-class _PinnedSOCKSHTTPSConnection(_PinnedSOCKSConnectionMixin, SOCKSHTTPSConnection):
+class _PinnedSOCKSHTTPSConnection(  # pylint: disable=too-many-ancestors
+    _PinnedSOCKSConnectionMixin, SOCKSHTTPSConnection
+):
     pass
 
 
@@ -474,13 +479,21 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
         ):
             self.max_retries = _DeadlineRetry.from_retry(self.max_retries)
 
-    def send(self, request, **kwargs):
+    def send(
+        self,
+        request,
+        stream=False,
+        timeout=None,
+        verify=True,
+        cert=None,
+        proxies=None,
+    ):
         deadline = _current_deadline.get()
         if deadline is None:
             raise RuntimeError("protected adapter used outside SafeHttpClient")
         try:
             target = self.policy._parse_target(request.url)
-            proxy_url = select_proxy(request.url, kwargs.get("proxies"))
+            proxy_url = select_proxy(request.url, proxies)
             proxy_state = None
             if proxy_url:
                 proxy_target = self.policy._parse_target(
@@ -522,8 +535,15 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
                 deadline=deadline,
                 proxy=proxy_state,
             )
-            kwargs["timeout"] = _DeadlineTimeout(deadline)
-            return super().send(request, **kwargs)
+            timeout = _DeadlineTimeout(deadline)
+            return super().send(
+                request,
+                stream=stream,
+                timeout=timeout,
+                verify=verify,
+                cert=cert,
+                proxies=proxies,
+            )
         except FetchPolicyError:
             raise
         except Exception as exc:
@@ -531,11 +551,11 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
                 raise FetchDeadlineExceeded("overall fetch deadline exceeded") from exc
             raise
 
-    def get_connection(self, request, *args, **kwargs):
+    def get_connection(self, url, proxies=None):
         """Fail closed on Requests versions without the TLS-context hook."""
         raise FetchPolicyError("protected fetching requires Requests 2.32.3 or newer")
 
-    def _get_connection(self, request, *args, **kwargs):
+    def _get_connection(self, request, verify, proxies=None, cert=None):
         """Fail closed on Requests 2.32.0 and 2.32.1."""
         raise FetchPolicyError("protected fetching requires Requests 2.32.3 or newer")
 
@@ -604,6 +624,7 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
             **pool_kwargs,
         )
         if state.target.scheme == "http" and proxy.target.scheme == "https":
+            # pylint: disable-next=attribute-defined-outside-init
             pool._comourat_cert_url = proxy.url  # type: ignore[union-attr]
         return pool
 

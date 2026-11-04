@@ -13,11 +13,11 @@ an explicit "unknown" state, not an empty result.
 import logging
 import re
 import time
-from typing import Any
+import xml.etree.ElementTree as ET
 
 import httpx
 
-from comourat.models import PaperCandidate, PaperCandidateCollection
+from comourat.models import PaperCandidateCollection
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +41,6 @@ def _extract_affiliations(html: str) -> dict[str, list[str]]:
     name. Multiple affiliation spans per author are common (dual
     appointments) and accumulate.
     """
-    # Author names appear as <span class="ltx_personname">Full Name</span>
-    author_spans = re.findall(
-        r'<span class="ltx_personname"[^>]*>(.*?)</span>', html, re.S
-    )
-
     # Walk the html in order, tracking the current author.
     author_to_affs: dict[str, list[str]] = {}
     pattern = re.compile(
@@ -95,8 +90,6 @@ class ArxivHtmlAffiliationFetcherCore:
         `published` is the original submission date; `updated` would be the
         last revision, which is NOT what the pipeline stores.
         """
-        import xml.etree.ElementTree as ET
-
         ns = {"a": "http://www.w3.org/2005/Atom"}
         try:
             r: httpx.Response = self.http_client.get(
@@ -112,7 +105,7 @@ class ArxivHtmlAffiliationFetcherCore:
             if published is None or not published.text:
                 return None
             return published.text[:10]  # YYYY-MM-DD
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("publication-date fetch failed for '%s': %s", arxiv_id, exc)
             return None
 
@@ -145,7 +138,7 @@ class ArxivHtmlAffiliationFetcherCore:
                 r: httpx.Response = self.http_client.get(url)
                 r.raise_for_status()
                 html = r.text
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.warning(
                     "affiliation fetch failed for '%s' (%s): %s",
                     paper.title,

@@ -11,7 +11,6 @@ import logging
 import time
 from datetime import date
 from typing import Any
-from urllib.parse import quote
 
 import requests
 
@@ -212,6 +211,7 @@ class OpenAlexClient:
         return PaperRecord(
             identity=PaperIdentity.from_values(arxiv_id=arxiv_id, doi=doi),
             title=work.get("display_name") or work.get("title") or "",
+            abstract=abstract,
             authors=[name for name in authors if name],
             publication_date=(
                 date.fromisoformat(work["publication_date"])

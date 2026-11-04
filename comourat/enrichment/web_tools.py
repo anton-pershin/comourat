@@ -36,7 +36,7 @@ def _ensure_tool_call_within_buffer(
     """
     usage = ctx.usage
     usage_limits = ctx.usage_limits
-    if usage_limits.tool_calls_limit is None:
+    if usage_limits is None or usage_limits.tool_calls_limit is None:
         return None
     if usage.tool_calls + tool_call_rejection_buffer > usage_limits.tool_calls_limit:
         logger.debug("attempted to exceed tool call limit")
@@ -71,7 +71,7 @@ def attach_web_tools(
         resolver=resolver,
     )
 
-    @agent.tool
+    @agent.tool  # type: ignore[arg-type]
     def extract_url(ctx: RunContext[dict], url: str) -> str:
         """Extract main article content from a URL."""
 
@@ -91,11 +91,11 @@ def attach_web_tools(
             if content:
                 return content
             return f"No extractable content found at {_redact_url(url)}"
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             return f"Error extracting {_redact_url(url)}: {type(e).__name__}"
         finally:
             tool_time_total += time.monotonic() - t_tool
-            agent._comourat_tool_time_total = tool_time_total  # type: ignore[attr-defined]
+            setattr(agent, "_comourat_tool_time_total", tool_time_total)
             logger.debug(
                 "extract_url %s | %.2fs (tool total %.2fs)",
                 _redact_url(url),
@@ -103,7 +103,7 @@ def attach_web_tools(
                 tool_time_total,
             )
 
-    @agent.tool
+    @agent.tool  # type: ignore[arg-type]
     def web_search(ctx: RunContext[dict], query: str, max_results: int = 5) -> str:
         """Search the web for information related to a query."""
 
@@ -132,17 +132,17 @@ def attach_web_tools(
             if not results:
                 return "No results found for the web search"
             return "\n\n".join(results)
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             return f"Error during web search: {type(e).__name__}"
         finally:
             tool_time_total += time.monotonic() - t_tool
-            agent._comourat_tool_time_total = tool_time_total  # type: ignore[attr-defined]
+            setattr(agent, "_comourat_tool_time_total", tool_time_total)
             logger.debug(
                 "web_search | %.2fs (tool total %.2fs)",
                 time.monotonic() - t_tool,
                 tool_time_total,
             )
 
-    agent._comourat_tool_time_total = tool_time_total  # type: ignore[attr-defined]
+    setattr(agent, "_comourat_tool_time_total", tool_time_total)
 
     return agent

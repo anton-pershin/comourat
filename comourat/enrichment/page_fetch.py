@@ -63,8 +63,7 @@ class PageFetcher:
         """Log a transport failure; warn loudly once when all requests fail."""
         self._transport_failures += 1
         if (
-            self._requests >= 2
-            and self._transport_failures == self._requests
+            2 <= self._requests == self._transport_failures
             and not self._all_failed_logged
         ):
             self._all_failed_logged = True
@@ -93,7 +92,7 @@ class PageFetcher:
             return None
         try:
             content = self.extractor(resp.text)
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error(
                 "content extraction failed for %s (%s)",
                 _redact_url(url),

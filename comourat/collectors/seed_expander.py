@@ -49,9 +49,10 @@ class SeedExpanderCore:
         candidate_model=PaperCandidate,
     ) -> None:
         self.candidate_model = candidate_model
-        self.client = paper_graph_client or openalex_client
-        if self.client is None:
+        client = paper_graph_client or openalex_client
+        if client is None:
             raise ValueError("paper_graph_client is required")
+        self.client: PaperGraphClient = client
         self.forward_budget = forward_budget
         self.search_budget = search_budget
         self.backward_budget = backward_budget

@@ -6,16 +6,12 @@ import logging
 import random
 import time
 from datetime import date
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import quote
-
-if TYPE_CHECKING:
-    from comourat.models import PaperGraphClient
 
 import requests
 
 from comourat.models import (
-    PaperGraphClient,
     PaperIdentity,
     PaperPage,
     PaperRecord,

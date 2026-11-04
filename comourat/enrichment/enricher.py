@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import cast
 
 from pydantic_ai import Agent, AgentRunResult
 from pydantic_ai.exceptions import UsageLimitExceeded
@@ -56,12 +57,12 @@ def create_enrichment_agent(
         model,
         output_type=EnrichmentResult,
         system_prompt=system_prompt,
-        model_settings=model_settings,
+        model_settings=model_settings,  # type: ignore[arg-type]
         retries=retries,
         deps_type=dict,
     )
-    return attach_web_tools(
-        agent,
+    return attach_web_tools(  # type: ignore[return-value]
+        agent,  # type: ignore[arg-type]
         tool_call_rejection_buffer=tool_call_rejection_buffer,
         http_session=http_session,
         proxy=proxy,
@@ -103,7 +104,7 @@ class EnrichmentAgent:
 
     def enrich(self, prompt: str) -> EnrichmentResult:
         """Run one enrichment call. Raises UsageLimitExceeded when limits hit."""
-        tools_before = self.agent._comourat_tool_time_total  # type: ignore[attr-defined]
+        tools_before = getattr(self.agent, "_comourat_tool_time_total", 0.0)
         t_run = time.monotonic()
         try:
             run_result: AgentRunResult = self.agent.run_sync(
@@ -119,13 +120,11 @@ class EnrichmentAgent:
             )
             raise
         run_s = time.monotonic() - t_run
-        tools_s = (
-            self.agent._comourat_tool_time_total - tools_before  # type: ignore[attr-defined]
-        )
+        tools_s = getattr(self.agent, "_comourat_tool_time_total", 0.0) - tools_before
         logger.debug(
             "enrich | total=%.2fs tools=%.2fs llm=%.2fs",
             run_s,
             tools_s,
             run_s - tools_s,
         )
-        return run_result.output
+        return cast(EnrichmentResult, run_result.output)
