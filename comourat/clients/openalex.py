@@ -207,11 +207,9 @@ class OpenAlexClient:
             entry.get("author", {}).get("display_name", "")
             for entry in work.get("authorships", [])
         ]
-        abstract = _abstract_from_inverted_index(work.get("abstract_inverted_index"))
         return PaperRecord(
             identity=PaperIdentity.from_values(arxiv_id=arxiv_id, doi=doi),
             title=work.get("display_name") or work.get("title") or "",
-            abstract=abstract,
             authors=[name for name in authors if name],
             publication_date=(
                 date.fromisoformat(work["publication_date"])
