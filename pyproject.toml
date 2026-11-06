@@ -19,7 +19,7 @@ dependencies = [
   "beautifulsoup4",
   "trafilatura",
   "pydantic",
-  "pydantic-ai",
+  "pydantic-ai >= 2.64.0",
 ]
 
 [build-system]
