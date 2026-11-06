@@ -105,6 +105,17 @@ def raw_server_factory():
         thread.join(timeout=2)
 
 
+def _start_stalling_raw_server(raw_server_factory, host="127.0.0.2"):
+    connection_started = threading.Event()
+
+    def stall(_connection):
+        connection_started.set()
+        time.sleep(1)
+
+    server = raw_server_factory(stall, host=host)
+    return server, connection_started
+
+
 def _client(server=None, timeout=0.1, retries=0, resolver=None):
     return SafeHttpClient(
         fetch_policy=_LoopbackControlPolicy(
@@ -428,36 +439,40 @@ def test_ssl_context_registers_socket_before_handshake():
 
 
 def test_stalled_tls_handshake_uses_absolute_deadline(raw_server_factory):
-    server = raw_server_factory(lambda connection: time.sleep(1))
-    client = _client(timeout=0.05)
+    server, connection_started = _start_stalling_raw_server(raw_server_factory)
+    client = _client(timeout=0.2)
     started = time.monotonic()
     with pytest.raises(FetchDeadlineExceeded):
         client.get(f"https://127.0.0.2:{server.server_address[1]}/")
     assert time.monotonic() - started < 0.5
+    assert connection_started.wait(0.5), "server did not accept the TLS connection"
     assert server.connections == 1
 
 
 def test_proxy_negotiation_uses_absolute_deadline(raw_server_factory):
-    server = raw_server_factory(lambda connection: time.sleep(1), host="127.0.0.1")
+    server, connection_started = _start_stalling_raw_server(
+        raw_server_factory, host="127.0.0.1"
+    )
     client = SafeHttpClient(
-        fetch_policy=FetchPolicy(overall_timeout=0.05),
+        fetch_policy=FetchPolicy(overall_timeout=0.2),
         proxy=f"http://127.0.0.1:{server.server_address[1]}",
     )
     started = time.monotonic()
     with pytest.raises(FetchDeadlineExceeded):
         client.get("https://93.184.216.34/")
     assert time.monotonic() - started < 0.5
+    assert connection_started.wait(0.5), "server did not accept the proxy connection"
     assert server.connections == 1
 
 
 def test_request_body_upload_uses_absolute_deadline(raw_server_factory):
-    server = raw_server_factory(lambda connection: time.sleep(1))
+    server, connection_started = _start_stalling_raw_server(raw_server_factory)
 
     def body():
         for _ in range(1024):
             yield b"x" * 65536
 
-    client = _client(timeout=0.05)
+    client = _client(timeout=0.2)
     started = time.monotonic()
     with pytest.raises(FetchDeadlineExceeded):
         client.post(
@@ -466,4 +481,5 @@ def test_request_body_upload_uses_absolute_deadline(raw_server_factory):
             headers={"Content-Length": str(1024 * 65536)},
         )
     assert time.monotonic() - started < 0.5
+    assert connection_started.wait(0.5), "server did not accept the upload connection"
     assert server.connections == 1

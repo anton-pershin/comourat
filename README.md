@@ -13,6 +13,7 @@ Comourat is a library, not a pipeline runner. Callers create and configure the c
 - Calculate post and citation influence scores and assess author authority.
 - Collect subreddit feeds or one specified Reddit post without collecting comments.
 - Search the web, extract page content, and add web-derived context to content items.
+- Summarize content through explicit success, empty-summary, provider-failure, and timeout results.
 - Use neutral Pydantic models for papers, posts, and enrichment results.
 - Enforce destination, redirect, DNS, trusted-proxy, and overall-deadline rules on article and enrichment fetches.
 
@@ -20,6 +21,7 @@ Comourat is a library, not a pipeline runner. Callers create and configure the c
 
 - Python 3.12 or later.
 - Requests 2.32.3 or later and urllib3 2.x for protected fetching.
+- pydantic-ai 2.64.0 or later for public summarization with overall deadlines.
 
 ## Install from a checkout
 
@@ -113,6 +115,52 @@ Failures have these public outcomes:
 Translated exceptions preserve the original exception as `__cause__`. Failures never produce an empty or partial successful result.
 
 The connection timeout defaults to 10 seconds and applies to each connection attempt. The overall operation timeout defaults to 30 seconds and includes request preparation and authentication hooks, DNS resolution, connections, TLS handshakes, request and response transfer, redirects, and response-body reading. Each stage receives only the remaining overall time. A redirect, new connection, or response read does not restart it. Both values must be positive finite numbers.
+
+## Public summarization
+
+Use `comourat.enrichment.summarizer.summarize` to summarize content with a caller-configured `pydantic-ai` model. Pass the model and content directly. Optional arguments configure the system prompt, model settings, non-empty policy, retries, retry delay, and overall timeout. Comourat does not read these settings or provider credentials from environment variables or configuration files.
+
+```python
+from comourat.enrichment.summarizer import (
+    EmptySummary,
+    SummaryFailure,
+    SummarySuccess,
+    summarize,
+)
+
+result = summarize(
+    model,  # A pydantic-ai Model configured by the caller.
+    content,
+    require_non_empty=True,
+    retries=2,
+    retry_delay=0.5,
+    overall_timeout=30,
+)
+
+if isinstance(result, SummarySuccess):
+    summary_text = result.summary
+elif isinstance(result, EmptySummary):
+    summary_text = None
+else:
+    assert isinstance(result, SummaryFailure)
+    error_category = result.error_category
+    error_message = result.error_message
+```
+
+The public result types are Pydantic models. The `outcome` field identifies each result:
+
+| Result | Meaning |
+|---|---|
+| `SummarySuccess(outcome="success")` | The provider succeeded. `summary` contains trimmed non-empty text. If `require_non_empty=False`, an empty provider response instead gives `summary=""`. |
+| `EmptySummary(outcome="empty")` | The provider returned empty or whitespace-only text, but the default `require_non_empty=True` policy rejected it. `summary` is empty. This outcome is not a provider failure and does not cause a retry. |
+| `SummaryFailure(outcome="failure", error_category="provider")` | The permitted provider attempts failed. `error_message` is `"Summarization provider failed."` |
+| `SummaryFailure(outcome="failure", error_category="timeout")` | The overall deadline ended the operation. `error_message` is `"Summarization exceeded the overall deadline."` |
+
+Public failures contain only these fixed categories and messages. They do not contain provider exception objects, provider error text, credentials, request headers, prompts, or raw provider responses.
+
+`retries` counts attempts after the first attempt. The default `retries=1` permits at most two provider calls. `retry_delay` is the requested delay between failed attempts and defaults to zero. `overall_timeout` defaults to 30 seconds. One monotonic deadline covers every provider wait and retry delay. Each attempt and delay receives only the remaining time. A retry does not reset or extend the deadline, and no new attempt starts after it expires. The retry count and deadline are independent upper bounds.
+
+`retries` must be a non-negative integer. `retry_delay` must be non-negative and finite. `overall_timeout` must be positive and finite. Invalid values raise `ValueError` before Comourat creates an agent or calls a provider.
 
 ## Protected web fetching
 
