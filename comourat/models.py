@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import Any, Protocol
+from typing import Annotated, Any, Literal, Protocol, TypeAlias
 
 from pydantic import BaseModel, Field
 
@@ -208,12 +208,35 @@ class PaperInfoCollection(BaseModel):
     papers: list[PaperInfo]
 
 
-class EnrichmentResult(BaseModel):
-    """LLM enrichment agent output: additional context points."""
+class EnrichmentSuccess(BaseModel):
+    """Successful enrichment that returned additional context."""
 
+    outcome: Literal["context"] = "context"
     additional_context: list[str] = Field(
+        min_length=1,
         description=(
             "Short self-contained context points with facts obtained from the web "
             "that are not already evident in the item"
-        )
+        ),
     )
+
+
+class EmptyEnrichment(BaseModel):
+    """Successful enrichment that returned no additional context."""
+
+    outcome: Literal["no_context"] = "no_context"
+    additional_context: list[str] = Field(default_factory=list, max_length=0)
+
+
+class EnrichmentFailure(BaseModel):
+    """A sanitized enrichment failure."""
+
+    outcome: Literal["failure"] = "failure"
+    error_category: Literal["search", "fetch", "provider", "usage_limit", "timeout"]
+    error_message: str
+
+
+EnrichmentResult: TypeAlias = Annotated[
+    EnrichmentSuccess | EmptyEnrichment | EnrichmentFailure,
+    Field(discriminator="outcome"),
+]

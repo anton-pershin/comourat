@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from comourat.enrichment.summarizer import summarize_with_events
-from comourat.models import EnrichmentResult
+from comourat.models import EnrichmentSuccess
 
 
 def _agent_returning(summary: str) -> MagicMock:
@@ -62,5 +62,6 @@ class TestSummarizeWithEvents:
 
 class TestEnrichmentResult:
     def test_additional_context_roundtrip(self):
-        result = EnrichmentResult(additional_context=["point one", "point two"])
+        result = EnrichmentSuccess(additional_context=["point one", "point two"])
+        assert result.outcome == "context"
         assert result.additional_context == ["point one", "point two"]

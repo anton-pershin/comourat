@@ -4,9 +4,11 @@ Checks collection metadata fields and excludes application-only research data.
 """
 
 import pytest
+from pydantic import TypeAdapter
 
 from comourat.models import (
     EnrichmentResult,
+    EnrichmentSuccess,
     HNPostCollection,
     HNPostInfo,
     PaperCandidate,
@@ -134,8 +136,6 @@ class TestInfoAndEnrichmentModels:
             title="T", link="https://arxiv.org/abs/2401.00001", abstract="A"
         )
         assert PaperInfo.model_validate_json(info.model_dump_json()) == info
-        enrichment = EnrichmentResult(additional_context=["c1"])
-        assert (
-            EnrichmentResult.model_validate_json(enrichment.model_dump_json())
-            == enrichment
-        )
+        enrichment = EnrichmentSuccess(additional_context=["c1"])
+        adapter = TypeAdapter(EnrichmentResult)
+        assert adapter.validate_json(enrichment.model_dump_json()) == enrichment
