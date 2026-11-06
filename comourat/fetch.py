@@ -194,6 +194,9 @@ class FetchPolicy:
     addresses and CIDR networks. The built-in target policy permits global
     unicast addresses only. An explicitly configured proxy may use a loopback
     or private address, but the same caller deny rules apply to it.
+    ``connection_timeout`` optionally caps each connection attempt. It never
+    exceeds the remaining overall time. The default ``None`` preserves the
+    overall-timeout-only behavior.
     """
 
     def __init__(
@@ -202,6 +205,7 @@ class FetchPolicy:
         deny_hosts: Iterable[str] = (),
         deny_addresses: Iterable[str] = (),
         overall_timeout: float = 30.0,
+        connection_timeout: float | None = None,
         max_redirects: int = 30,
         max_retries: int = 0,
     ) -> None:
@@ -211,6 +215,13 @@ class FetchPolicy:
             raise ValueError("overall timeout must be a positive finite number")
         if not math.isfinite(overall_timeout) or overall_timeout <= 0:
             raise ValueError("overall timeout must be a positive finite number")
+        if connection_timeout is not None and (
+            isinstance(connection_timeout, bool)
+            or not isinstance(connection_timeout, (int, float))
+            or not math.isfinite(connection_timeout)
+            or connection_timeout <= 0
+        ):
+            raise ValueError("connection timeout must be a positive finite number")
         if (
             isinstance(max_redirects, bool)
             or not isinstance(max_redirects, int)
@@ -234,6 +245,9 @@ class FetchPolicy:
                 ) from exc
         self.deny_networks = tuple(networks)
         self.overall_timeout = float(overall_timeout)
+        self.connection_timeout = (
+            None if connection_timeout is None else float(connection_timeout)
+        )
         self.max_redirects = max_redirects
         self.max_retries = max_retries
 

@@ -13,7 +13,11 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
-from comourat._fetch_transport import _DeadlineRetry, _DeadlineSSLContext
+from comourat._fetch_transport import (
+    _DeadlineRetry,
+    _DeadlineSSLContext,
+    _DeadlineTimeout,
+)
 from comourat.fetch import (
     FetchDeadlineExceeded,
     FetchPolicy,
@@ -183,6 +187,29 @@ def test_redirect_and_slow_headers_share_one_deadline(server_factory):
     assert server.calls == 2
 
 
+def test_session_authentication_consumes_the_same_deadline(server_factory):
+    server = server_factory(_send_ok)
+    now = [0.0]
+
+    class AdvancingAuth:
+        def __call__(self, request):
+            now[0] += 2.0
+            return request
+
+    session = requests.Session()
+    session.auth = AdvancingAuth()
+    client = SafeHttpClient(
+        http_session=session,
+        fetch_policy=_LoopbackControlPolicy(overall_timeout=1.0),
+        clock=lambda: now[0],
+    )
+
+    with pytest.raises(FetchDeadlineExceeded):
+        client.get(f"http://127.0.0.2:{server.server_port}/")
+
+    assert server.calls == 0
+
+
 def test_retry_consumes_the_same_deadline(server_factory):
     def behavior(handler):
         if handler.server.calls == 1:
@@ -202,8 +229,64 @@ def test_retry_consumes_the_same_deadline(server_factory):
 def test_default_policy_has_thirty_second_deadline_and_no_retries():
     policy = FetchPolicy()
     assert policy.overall_timeout == 30
+    assert policy.connection_timeout is None
     assert policy.max_retries == 0
     assert policy.max_redirects == 30
+
+
+@pytest.mark.parametrize(
+    "value", [0, -1, True, False, float("nan"), float("inf"), "10"]
+)
+def test_connection_timeout_must_be_positive_finite_number_or_none(value):
+    with pytest.raises(ValueError):
+        FetchPolicy(connection_timeout=value)
+
+
+def test_connection_timeout_uses_remaining_overall_time_as_its_upper_bound():
+    class ControlledDeadline:
+        remaining_seconds = 5.0
+
+        def remaining(self):
+            return self.remaining_seconds
+
+    deadline = ControlledDeadline()
+    timeout = _DeadlineTimeout(deadline, connection_timeout=10.0)
+
+    assert timeout.connect_timeout == 5.0
+    assert timeout.read_timeout == 5.0
+
+    deadline.remaining_seconds = 20.0
+    assert timeout.connect_timeout == 10.0
+    assert timeout.read_timeout == 20.0
+
+    cloned = timeout.clone()
+    assert cloned.connect_timeout == 10.0
+    assert cloned.read_timeout == 20.0
+
+
+def test_adapter_receives_the_configured_connection_timeout(
+    server_factory, monkeypatch
+):
+    import comourat._fetch_transport as transport
+
+    server = server_factory(_send_ok)
+    original_timeout = transport._DeadlineTimeout
+    received = []
+
+    def recording_timeout(deadline, connection_timeout=None):
+        received.append(connection_timeout)
+        return original_timeout(deadline, connection_timeout)
+
+    monkeypatch.setattr(transport, "_DeadlineTimeout", recording_timeout)
+    client = SafeHttpClient(
+        fetch_policy=_LoopbackControlPolicy(overall_timeout=5.0, connection_timeout=1.0)
+    )
+
+    response = client.get(f"http://127.0.0.2:{server.server_port}/")
+
+    assert response.status_code == 200
+    assert received
+    assert set(received) == {1.0}
 
 
 def test_redirect_limit_stops_before_another_request(server_factory):
