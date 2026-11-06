@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import threading
 import time
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import requests
+import socks
 
 from comourat.enrichment.page_fetch import (
     ArticleFetchError,
@@ -16,7 +18,12 @@ from comourat.enrichment.page_fetch import (
     extract_article_title,
     extract_main_content,
 )
-from comourat.fetch import FetchDeadlineExceeded, FetchPolicy, FetchResolutionError
+from comourat.fetch import (
+    FetchDeadlineExceeded,
+    FetchPolicy,
+    FetchPolicyError,
+    FetchResolutionError,
+)
 from comourat.models import ArticleResult
 
 URL = "https://example.com/research/article"
@@ -179,6 +186,17 @@ def test_unsupported_scheme_policy_failure_has_its_own_category():
     _assert_category(caught.value, "unsupported_scheme")
 
 
+def test_fetch_policy_unsupported_redirect_scheme_has_its_own_category():
+    session = _session()
+    session.get.side_effect = FetchPolicyError(
+        "target URL scheme 'file' is not supported"
+    )
+    fetcher = _fetcher(session)
+    with pytest.raises(ArticleFetchError) as caught:
+        fetcher.fetch(URL)
+    _assert_category(caught.value, "unsupported_scheme")
+
+
 @pytest.mark.parametrize("status", [404, 410])
 def test_missing_source_content_is_unavailable(status):
     response = _response(status=status)
@@ -189,7 +207,7 @@ def test_missing_source_content_is_unavailable(status):
     response.close.assert_called_once()
 
 
-@pytest.mark.parametrize("status", [400, 403, 500, 503, 302, True, None])
+@pytest.mark.parametrize("status", [400, 403, 500, 503, 302, 404.0, 410.0, True, None])
 def test_other_http_and_invalid_statuses_are_provider_failures(status):
     response = _response(status=status)
     fetcher = _fetcher(_session(response))
@@ -352,6 +370,33 @@ def test_page_fetcher_passes_connection_timeout_to_protected_policy():
     fetcher = _fetcher(_session(), connection_timeout=1.5, operation_timeout=4)
     assert fetcher.http_client.policy.connection_timeout == 1.5
     assert fetcher.http_client.policy.overall_timeout == 4.0
+
+
+@pytest.mark.parametrize("proxy", [None, "socks5h://127.0.0.1:1080"])
+def test_blocked_socket_connect_uses_cap_and_returns_timeout(monkeypatch, proxy):
+    observed_timeouts = []
+
+    def blocked_connect(sock, address, *args):
+        observed_timeouts.append(sock.gettimeout())
+        raise socket.timeout("controlled blocked connect")
+
+    monkeypatch.setattr(socket.socket, "connect", blocked_connect)
+    monkeypatch.setattr(socks.socksocket, "connect", blocked_connect)
+    session = requests.Session()
+    fetcher = _fetcher(
+        session,
+        proxy=proxy,
+        connection_timeout=0.25,
+        operation_timeout=5,
+    )
+
+    with pytest.raises(ArticleFetchError) as caught:
+        fetcher.fetch("http://93.184.216.34/")
+
+    _assert_category(caught.value, "timeout")
+    assert observed_timeouts
+    assert set(observed_timeouts) == {0.25}
+    session.close()
 
 
 def test_extraction_wait_uses_remaining_operation_time():

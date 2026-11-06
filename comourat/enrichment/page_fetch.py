@@ -207,6 +207,15 @@ class PageFetcher:
         self._log_transport_failure(url, error)
         return ArticleFetchError(category)
 
+    @staticmethod
+    def _validate_response_status(status: object) -> None:
+        if isinstance(status, bool) or not isinstance(status, int):
+            raise ArticleFetchError("provider")
+        if status in {404, 410}:
+            raise ArticleFetchError("unavailable")
+        if not 200 <= status < 300:
+            raise ArticleFetchError("provider")
+
     def _get_html(self, url: str) -> tuple[str, str]:
         response = None
         try:
@@ -214,15 +223,7 @@ class PageFetcher:
                 url,
                 headers={"User-Agent": DEFAULT_USER_AGENT},
             )
-            status = response.status_code
-            if status in {404, 410}:
-                raise ArticleFetchError("unavailable")
-            if (
-                isinstance(status, bool)
-                or not isinstance(status, int)
-                or not 200 <= status < 300
-            ):
-                raise ArticleFetchError("provider")
+            self._validate_response_status(response.status_code)
             html = response.text
             if not isinstance(html, str):
                 raise TypeError("article response text is not a string")

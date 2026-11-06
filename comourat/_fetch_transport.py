@@ -237,18 +237,48 @@ def _response_class(deadline: _Deadline):
     return DeadlineHTTPResponse
 
 
+def _connection_timeout_remaining(
+    deadline: _Deadline, connection_timeout: float | None
+) -> float:
+    remaining = deadline.remaining()
+    if connection_timeout is None:
+        return remaining
+    return min(connection_timeout, remaining)
+
+
+def _is_connection_timeout(error: BaseException | None) -> bool:
+    if isinstance(error, (socket.timeout, TimeoutError)):
+        return True
+    socket_error = getattr(error, "socket_err", None)
+    return isinstance(socket_error, (socket.timeout, TimeoutError))
+
+
 class _DeadlineSocket(socket.socket):
     """Socket that refreshes its timeout around blocking operations."""
 
-    def __init__(self, *args, deadline: _Deadline, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        deadline: _Deadline,
+        connection_timeout: float | None = None,
+        **kwargs,
+    ) -> None:
         self._comourat_deadline = deadline
+        self._comourat_connection_timeout = connection_timeout
         super().__init__(*args, **kwargs)
 
     def _refresh(self) -> None:
         super().settimeout(self._comourat_deadline.remaining())
 
+    def _refresh_connection(self) -> None:
+        super().settimeout(
+            _connection_timeout_remaining(
+                self._comourat_deadline, self._comourat_connection_timeout
+            )
+        )
+
     def connect(self, address):
-        self._refresh()
+        self._refresh_connection()
         result = super().connect(address)
         self._refresh()
         return result
@@ -294,6 +324,7 @@ class _PinnedConnectionMixin:
                     socktype,
                     proto,
                     deadline=self._comourat_deadline,
+                    connection_timeout=self.timeout,
                 )
                 self._comourat_deadline.register(sock)
                 if self.socket_options:
@@ -311,6 +342,10 @@ class _PinnedConnectionMixin:
                     break
         if self._comourat_deadline.expired():
             raise ConnectTimeoutError(self, "overall fetch deadline exceeded")
+        if _is_connection_timeout(last_error):
+            raise ConnectTimeoutError(
+                self, "connection timeout exceeded"
+            ) from last_error
         raise NewConnectionError(self, f"failed to connect: {last_error}")
 
 
@@ -331,19 +366,34 @@ class _PinnedHTTPSConnectionPool(HTTPSConnectionPool):
 
 
 class _PinnedSocksSocket(socks.socksocket):
-    def __init__(self, *args, proxy_sockaddr, deadline: _Deadline, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        proxy_sockaddr,
+        deadline: _Deadline,
+        connection_timeout: float | None = None,
+        **kwargs,
+    ) -> None:
         self._comourat_deadline = deadline
+        self._comourat_connection_timeout = connection_timeout
         self._proxy_sockaddr = proxy_sockaddr
         super().__init__(*args, **kwargs)
 
     def _refresh(self) -> None:
         super().settimeout(self._comourat_deadline.remaining())
 
+    def _refresh_connection(self) -> None:
+        super().settimeout(
+            _connection_timeout_remaining(
+                self._comourat_deadline, self._comourat_connection_timeout
+            )
+        )
+
     def _proxy_addr(self):
         return self._proxy_sockaddr
 
     def connect(self, dest_pair, catch_errors=None):
-        self._refresh()
+        self._refresh_connection()
         result = super().connect(dest_pair, catch_errors)
         self._refresh()
         return result
@@ -405,6 +455,7 @@ class _PinnedSOCKSConnectionMixin(_PinnedConnectionMixin):
                         proto,
                         proxy_sockaddr=proxy_sockaddr,
                         deadline=self._comourat_deadline,
+                        connection_timeout=self.timeout,
                     )
                     self._comourat_deadline.register(sock)
                     if self.socket_options:
@@ -436,6 +487,10 @@ class _PinnedSOCKSConnectionMixin(_PinnedConnectionMixin):
                         break
         if self._comourat_deadline.expired():
             raise ConnectTimeoutError(self, "overall fetch deadline exceeded")
+        if _is_connection_timeout(last_error):
+            raise ConnectTimeoutError(
+                self, "connection timeout exceeded"
+            ) from last_error
         raise NewConnectionError(self, f"SOCKS connection failed: {last_error}")
 
 
