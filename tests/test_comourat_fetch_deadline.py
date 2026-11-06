@@ -12,11 +12,14 @@ from unittest.mock import MagicMock
 
 import pytest
 import requests
+import socks
 
 from comourat._fetch_transport import (
     _DeadlineRetry,
+    _DeadlineSocket,
     _DeadlineSSLContext,
     _DeadlineTimeout,
+    _PinnedSocksSocket,
 )
 from comourat.fetch import (
     FetchDeadlineExceeded,
@@ -273,6 +276,53 @@ def test_connection_timeout_uses_remaining_overall_time_as_its_upper_bound():
     cloned = timeout.clone()
     assert cloned.connect_timeout == 10.0
     assert cloned.read_timeout == 20.0
+
+
+def test_direct_socket_restores_overall_timeout_after_connect(monkeypatch):
+    deadline = _Deadline.start(5, time.monotonic)
+    sock = _DeadlineSocket(
+        socket.AF_INET,
+        socket.SOCK_STREAM,
+        deadline=deadline,
+        connection_timeout=0.25,
+    )
+    observed = []
+
+    def successful_connect(socket_instance, address):
+        observed.append(socket_instance.gettimeout())
+
+    monkeypatch.setattr(socket.socket, "connect", successful_connect)
+    try:
+        sock.connect(("93.184.216.34", 80))
+        assert observed == [0.25]
+        assert 0.25 < sock.gettimeout() <= 5
+    finally:
+        sock.close()
+        deadline.close()
+
+
+def test_socks_socket_restores_overall_timeout_after_connect(monkeypatch):
+    deadline = _Deadline.start(5, time.monotonic)
+    sock = _PinnedSocksSocket(
+        socket.AF_INET,
+        socket.SOCK_STREAM,
+        proxy_sockaddr=("127.0.0.1", 1080),
+        deadline=deadline,
+        connection_timeout=0.25,
+    )
+    observed = []
+
+    def successful_connect(socket_instance, address, *args):
+        observed.append(socket_instance.gettimeout())
+
+    monkeypatch.setattr(socks.socksocket, "connect", successful_connect)
+    try:
+        sock.connect(("93.184.216.34", 80))
+        assert observed == [0.25]
+        assert 0.25 < sock.gettimeout() <= 5
+    finally:
+        sock.close()
+        deadline.close()
 
 
 def test_adapter_receives_the_configured_connection_timeout(

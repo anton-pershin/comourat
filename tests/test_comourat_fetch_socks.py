@@ -13,7 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 import requests
 
+from comourat.enrichment.page_fetch import ArticleFetchError
 from comourat.fetch import FetchPolicy, FetchPolicyError, SafeHttpClient
+from comourat.models import ArticleResult
 
 
 class _LoopbackControlPolicy(FetchPolicy):
@@ -400,11 +402,20 @@ def test_socks_allowed_redirect_control(servers, scheme):
 def _entry_succeeded(kind, result):
     if kind == "search":
         return "Title: SOCKS result" in result
+    if kind == "page":
+        return (
+            isinstance(result, ArticleResult)
+            and "Allowed SOCKS article content" in result.text
+        )
     return result is not None and "Allowed SOCKS article content" in result
 
 
 def _entry_failed(result):
-    return result is None or result.startswith("Error ")
+    return (
+        isinstance(result, ArticleFetchError)
+        or result is None
+        or (isinstance(result, str) and result.startswith("Error "))
+    )
 
 
 @pytest.mark.parametrize("kind", ["page", "extract", "search"])

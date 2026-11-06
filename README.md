@@ -217,6 +217,43 @@ Public failures contain only these fixed categories and messages. They do not co
 
 `retries` must be a non-negative integer. `retry_delay` must be non-negative and finite. `overall_timeout` must be positive and finite. Invalid values raise `ValueError` before Comourat creates an agent or calls a provider.
 
+## Research-article extraction
+
+`PageFetcher.fetch` returns an `ArticleResult` for a research-related public blog or article URL. The result contains a non-empty title, the source URL, and the extracted main text. Comourat does not summarize the text. It removes leading and trailing whitespace from the title and text. After a redirect, `source_url` is the final response URL. If the response does not supply a URL, it is the validated input URL.
+
+```python
+from comourat.enrichment.page_fetch import ArticleFetchError, PageFetcher
+
+fetcher = PageFetcher(connection_timeout=10, operation_timeout=30)
+try:
+    article = fetcher.fetch("https://example.org/research/article")
+    print(article.title)
+    print(article.source_url)
+    print(article.text)
+except ArticleFetchError as exc:
+    print(f"Article extraction failed: {exc.category}")
+```
+
+The default title extractor uses Trafilatura metadata. It falls back to the HTML document title and then the first `h1` heading. The `extractor` and `title_extractor` constructor arguments support controlled extraction when needed.
+
+Expected failures raise `ArticleFetchError`. Its `category` is one of:
+
+| Category | Meaning |
+|---|---|
+| `invalid_input` | The URL is malformed, or the local fetch policy denies the target. |
+| `unsupported_scheme` | The direct or redirected target does not use HTTP or HTTPS. |
+| `unavailable` | The source returned HTTP 404 or 410. |
+| `empty_extraction` | The extracted title or text is missing, empty, or whitespace-only. |
+| `timeout` | A connection, response, overall-operation, or extraction-wait deadline expired. |
+| `provider` | Another HTTP, DNS, connection, response, or source-request failure occurred. |
+| `extraction` | A title or text extractor failed or returned a value of the wrong type. |
+
+Error messages are fixed Comourat messages. They do not copy provider error text, response content, URL userinfo, paths, queries, or credentials. No failure returns a partial `ArticleResult`.
+
+The default connection timeout is 10 seconds for each connection attempt. The default overall operation timeout is 30 seconds. The overall limit starts before source retrieval and includes DNS, source and proxy connections, request and response transfer, redirects, retries, and the wait for local title and text extraction. Each stage uses only the remaining time. A late extraction result is discarded and produces the `timeout` category.
+
+`timeout` remains an alias for `operation_timeout`. Do not pass `timeout`, `connection_timeout`, or `operation_timeout` together with `fetch_policy`; the supplied policy controls both limits instead. To allow connection attempts to use all remaining operation time without a separate connection cap, pass `FetchPolicy(connection_timeout=None, overall_timeout=...)`. Constructor configuration errors continue to raise their configuration exceptions.
+
 ## Protected web fetching
 
 `PageFetcher` and the web tools used by `create_enrichment_agent`, `EnrichmentAgent`, and `PaperDiscovererCore` use `SafeHttpClient`. The default `FetchPolicy` permits only HTTP and HTTPS targets with global unicast addresses. It rejects loopback, private, link-local, unspecified, multicast, reserved, carrier-grade NAT, and other non-global IPv4 and IPv6 addresses. IPv4-mapped IPv6 addresses are checked in both address families.
@@ -261,9 +298,9 @@ SOCKS4 supports only IPv4 targets. An IPv6 target through SOCKS4 is rejected bef
 
 Each top-level request has one monotonic overall deadline. The default is 30 seconds. DNS resolution, direct and proxy connections, proxy negotiation, TLS handshakes, request and response transfer, response-body reading, redirects, retries, and retry delays all consume the same budget. Each stage receives only the remaining time. A slow peer cannot restart the timeout by sending data slowly.
 
-The default redirect limit is 30 and automatic retries are disabled (`max_retries=0`). `FetchPolicy(connection_timeout=...)` optionally caps each connection attempt without exceeding the remaining overall time. Its default `None` preserves the overall-timeout-only behavior. `PageFetcher(timeout=...)` remains available as an alias for configuring the default policy timeout. Do not pass `timeout` and `fetch_policy` together.
+The default redirect limit is 30 and automatic retries are disabled (`max_retries=0`). `FetchPolicy(connection_timeout=...)` optionally caps each connection attempt without exceeding the remaining overall time. Its default `None` preserves the overall-timeout-only behavior. The direct `PageFetcher` timeout settings and aliases are described in the article-extraction section.
 
-`SafeHttpClient` raises `FetchPolicyError` for local policy denials, `FetchResolutionError` for resolution failures, and `FetchDeadlineExceeded` when the overall deadline expires. Proxy-enforced denials can appear as proxy or HTTP errors. No failure selects an unprotected direct or proxy fallback. Logs and client exceptions remove URL userinfo, paths, queries, and proxy credentials. The existing `PageFetcher` result contract remains unchanged. `EnrichmentAgent` converts protected search and fetch exceptions into the public failure results described above. Direct `attach_web_tools` use keeps its string-returning default for other agents, including paper discovery.
+`SafeHttpClient` raises `FetchPolicyError` for local policy denials, `FetchResolutionError` for resolution failures, and `FetchDeadlineExceeded` when the overall deadline expires. Proxy-enforced denials can appear as proxy or HTTP errors. No failure selects an unprotected direct or proxy fallback. Logs and client exceptions remove URL userinfo, paths, queries, and proxy credentials. `PageFetcher` translates these failures into its public article categories. `EnrichmentAgent` converts protected search and fetch exceptions into the public failure results described above. Direct `attach_web_tools` use keeps its string-returning default for other agents, including paper discovery.
 
 ## Tests
 

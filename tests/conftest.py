@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from comourat.enrichment.page_fetch import PageFetcher
+from comourat.enrichment.page_fetch import ArticleFetchError, PageFetcher
 from comourat.enrichment.web_tools import attach_web_tools
 
 
@@ -76,7 +76,15 @@ def entry_point_factory(monkeypatch):
 
     def create(kind, **client_kwargs):
         if kind == "page":
-            return PageFetcher(**client_kwargs).fetch
+            fetch = PageFetcher(**client_kwargs).fetch
+
+            def fetch_article(url):
+                try:
+                    return fetch(url)
+                except ArticleFetchError as exc:
+                    return exc
+
+            return fetch_article
         agent = _ToolAgent()
         attach_web_tools(agent, **client_kwargs)
         if kind == "extract":

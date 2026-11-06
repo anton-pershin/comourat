@@ -46,3 +46,7 @@
 | Connection binding | Use of the IP address validated by the DNS-resolving component for the actual connection, without an independent second resolution. |
 | Overall deadline | One monotonic time limit shared by every stage of a top-level fetch, including DNS, connection setup, response transfer, redirects, and retries. |
 | Trusted-proxy DNS | Target hostname resolution by an explicitly configured caller-hosted proxy that applies equivalent resolved-address and CIDR deny rules through the proxy or its network. |
+| Article result | The title, final source URL, and non-empty extracted text of a research-related public article. |
+| Article failure category | A stable public value that identifies an article input, source, timeout, or extraction failure. |
+| Connection timeout | The maximum time for one source or proxy connection attempt, limited by the remaining overall deadline. |
+| Article operation deadline | One monotonic time limit for source retrieval and the wait for local title and text extraction. |
