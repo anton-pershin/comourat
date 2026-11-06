@@ -41,4 +41,8 @@
 | Reddit post | A post collected from Reddit, with its source identifiers and available engagement data. |
 | Hacker News story | A Hacker News submission with its title, URL, points, and comment count. |
 | Pagination continuation | A source-provided value used to request the next page of results. |
-| Proxy URL | A URL that specifies the proxy used for outgoing HTTP requests.
+| Proxy URL | A URL that specifies the proxy used for outgoing HTTP requests. |
+| Fetch policy | Caller-provided rules that control target URLs, denied destinations, redirects, retries, and the overall deadline for a fetch. |
+| Connection binding | Use of the IP address validated by the DNS-resolving component for the actual connection, without an independent second resolution. |
+| Overall deadline | One monotonic time limit shared by every stage of a top-level fetch, including DNS, connection setup, response transfer, redirects, and retries. |
+| Trusted-proxy DNS | Target hostname resolution by an explicitly configured caller-hosted proxy that applies equivalent resolved-address and CIDR deny rules through the proxy or its network. |

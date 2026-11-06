@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import cast
 
 from pydantic_ai import Agent, AgentRunResult
 from pydantic_ai.exceptions import UsageLimitExceeded
@@ -11,6 +12,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
 from comourat.enrichment.web_tools import attach_web_tools
+from comourat.fetch import FetchPolicy, Resolver
 from comourat.models import PaperCandidateCollection
 
 logger = logging.getLogger(__name__)
@@ -55,13 +57,17 @@ class PaperDiscovererCore:
         model: Model,
         attribute_description: str,
         constraints_description: str = "",
-        candidate_model: type = None,
+        candidate_model: type | None = None,
         system_prompt: str = SYSTEM_PROMPT,
         model_settings: dict | None = None,
         retries: int | None = None,
         request_limit: int = 30,
         tool_calls_limit: int = 15,
         tool_call_rejection_buffer: int = 4,
+        http_session=None,
+        proxy: str | None = None,
+        fetch_policy: FetchPolicy | None = None,
+        resolver: Resolver | None = None,
     ) -> None:
         self.attribute_description = attribute_description
         self.constraints_description = constraints_description
@@ -72,12 +78,17 @@ class PaperDiscovererCore:
             model,
             output_type=candidate_model,
             system_prompt=system_prompt,
-            model_settings=model_settings,
+            model_settings=model_settings,  # type: ignore[arg-type]
             retries=retries,
             deps_type=dict,
         )
         attach_web_tools(
-            self.agent, tool_call_rejection_buffer=tool_call_rejection_buffer
+            self.agent,
+            tool_call_rejection_buffer=tool_call_rejection_buffer,
+            http_session=http_session,
+            proxy=proxy,
+            fetch_policy=fetch_policy,
+            resolver=resolver,
         )
 
         self.request_limit = request_limit
@@ -105,7 +116,7 @@ class PaperDiscovererCore:
         """Run the discovery agent; returns (candidates, summary_lines)."""
         prompt = self.build_prompt()
 
-        tools_before = self.agent._comourat_tool_time_total  # type: ignore[attr-defined]
+        tools_before = getattr(self.agent, "_comourat_tool_time_total", 0.0)
         t_run = time.monotonic()
         try:
             run_result: AgentRunResult = self.agent.run_sync(
@@ -121,9 +132,7 @@ class PaperDiscovererCore:
             )
             raise
         run_s = time.monotonic() - t_run
-        tools_s = (
-            self.agent._comourat_tool_time_total - tools_before  # type: ignore[attr-defined]
-        )
+        tools_s = getattr(self.agent, "_comourat_tool_time_total", 0.0) - tools_before
         logger.debug(
             "discover | total=%.2fs tools=%.2fs llm=%.2fs",
             run_s,
@@ -131,7 +140,7 @@ class PaperDiscovererCore:
             run_s - tools_s,
         )
 
-        result: PaperCandidateCollection = run_result.output
+        result = cast(PaperCandidateCollection, run_result.output)
         # Discovery is not an identifier authority. Canonical identifiers are
         # accepted only from graph-client records or later deterministic lookup.
         for paper in result.papers:

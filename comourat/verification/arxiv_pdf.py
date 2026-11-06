@@ -91,7 +91,7 @@ class ArxivPdfVerifierCore:
         for index, paper in enumerate(papers):
             try:
                 outcome = self._verify_one(paper, index)
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 outcome = ArxivPdfVerificationOutcome(
                     paper_index=index,
                     status=ArxivPdfVerificationStatus.API_ERROR,

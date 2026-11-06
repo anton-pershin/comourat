@@ -12,7 +12,9 @@ dependencies = [
   "rich >= 14.0.0",
   "feedparser",
   "httpx",
-  "requests",
+  "idna",
+  "requests >= 2.32.3",
+  "urllib3 >= 2.0",
   "PySocks",  # SOCKS proxies need it; requests reports a missing import
   "beautifulsoup4",
   "trafilatura",

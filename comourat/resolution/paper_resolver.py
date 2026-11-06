@@ -103,7 +103,7 @@ class PaperResolverCore:
         for index, candidate in enumerate(candidates):
             try:
                 record, reason = self._resolve_candidate(candidate)
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 record, reason = None, "api_error"
             if record is None:
                 outcomes.append(

@@ -122,7 +122,7 @@ class AuthorityInfluenceAssessorCore:
             try:
                 result: AuthorityResult = self.agent.run_sync(prompt).output
                 return result
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
                 if attempt >= self.request_retries:
                     self.logger.warning(
                         "authority batch of %d papers failed after %d attempts: %s",

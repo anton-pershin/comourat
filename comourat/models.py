@@ -163,7 +163,9 @@ class PaperCandidate(BaseModel):
     doi: str | None = None
     publication_date: str | None = Field(
         default=None,
-        description="ISO publication date when the producer supplies one deterministically",
+        description=(
+            "ISO publication date when the producer supplies one deterministically"
+        ),
     )
     influence_score: int | None = Field(
         default=None,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import cast
 
 from pydantic_ai import Agent, AgentRunResult
 from pydantic_ai.exceptions import UsageLimitExceeded
@@ -16,6 +17,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
 from comourat.enrichment.web_tools import attach_web_tools
+from comourat.fetch import FetchPolicy, Resolver
 from comourat.models import EnrichmentResult
 
 logger = logging.getLogger(__name__)
@@ -45,18 +47,27 @@ def create_enrichment_agent(
     model_settings: dict | None = None,
     retries: int | None = None,
     tool_call_rejection_buffer: int = 4,
+    http_session=None,
+    proxy: str | None = None,
+    fetch_policy: FetchPolicy | None = None,
+    resolver: Resolver | None = None,
 ) -> Agent:
     """Create an enrichment agent with URL extraction and web search tools."""
     agent = Agent(
         model,
         output_type=EnrichmentResult,
         system_prompt=system_prompt,
-        model_settings=model_settings,
+        model_settings=model_settings,  # type: ignore[arg-type]
         retries=retries,
         deps_type=dict,
     )
-    return attach_web_tools(
-        agent, tool_call_rejection_buffer=tool_call_rejection_buffer
+    return attach_web_tools(  # type: ignore[return-value]
+        agent,  # type: ignore[arg-type]
+        tool_call_rejection_buffer=tool_call_rejection_buffer,
+        http_session=http_session,
+        proxy=proxy,
+        fetch_policy=fetch_policy,
+        resolver=resolver,
     )
 
 
@@ -72,6 +83,10 @@ class EnrichmentAgent:
         request_limit: int = 20,
         tool_calls_limit: int = 10,
         tool_call_rejection_buffer: int = 4,
+        http_session=None,
+        proxy: str | None = None,
+        fetch_policy: FetchPolicy | None = None,
+        resolver: Resolver | None = None,
     ) -> None:
         self.agent = create_enrichment_agent(
             model,
@@ -79,13 +94,17 @@ class EnrichmentAgent:
             model_settings=model_settings,
             retries=retries,
             tool_call_rejection_buffer=tool_call_rejection_buffer,
+            http_session=http_session,
+            proxy=proxy,
+            fetch_policy=fetch_policy,
+            resolver=resolver,
         )
         self.request_limit = request_limit
         self.tool_calls_limit = tool_calls_limit
 
     def enrich(self, prompt: str) -> EnrichmentResult:
         """Run one enrichment call. Raises UsageLimitExceeded when limits hit."""
-        tools_before = self.agent._comourat_tool_time_total  # type: ignore[attr-defined]
+        tools_before = getattr(self.agent, "_comourat_tool_time_total", 0.0)
         t_run = time.monotonic()
         try:
             run_result: AgentRunResult = self.agent.run_sync(
@@ -101,13 +120,11 @@ class EnrichmentAgent:
             )
             raise
         run_s = time.monotonic() - t_run
-        tools_s = (
-            self.agent._comourat_tool_time_total - tools_before  # type: ignore[attr-defined]
-        )
+        tools_s = getattr(self.agent, "_comourat_tool_time_total", 0.0) - tools_before
         logger.debug(
             "enrich | total=%.2fs tools=%.2fs llm=%.2fs",
             run_s,
             tools_s,
             run_s - tools_s,
         )
-        return run_result.output
+        return cast(EnrichmentResult, run_result.output)

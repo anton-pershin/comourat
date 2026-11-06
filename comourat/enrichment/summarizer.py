@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from time import perf_counter
-from types import SimpleNamespace
 
 from pydantic import BaseModel
 from pydantic_ai import Agent
@@ -36,9 +34,9 @@ def _create_summary_agent(
     """Create an agent with structured summary output."""
     return Agent(
         model,
-        output_type=_SummaryOutput,
+        output_type=_SummaryOutput,  # type: ignore[arg-type]
         system_prompt=system_prompt,
-        model_settings=model_settings,
+        model_settings=model_settings,  # type: ignore[arg-type]
         retries=0,
     )
 
@@ -72,7 +70,7 @@ def summarize_with_events(
                 }
             )
             return summary.strip(), events
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             last_error = exc
             events.append(
                 {

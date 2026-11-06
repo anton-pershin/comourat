@@ -104,11 +104,12 @@ class ArxivPaperCollectorCore:
         else:
             self.start_date: datetime.date = datetime.date.fromisoformat(start_date)
 
+        self.end_date: datetime.date
         if end_date is None:
             today_fn = today_fn or datetime.date.today
-            self.end_date: datetime.date = today_fn()
+            self.end_date = today_fn()
         else:
-            self.end_date: datetime.date = datetime.date.fromisoformat(end_date)
+            self.end_date = datetime.date.fromisoformat(end_date)
 
         self.max_results = max_results
         self.keywords = keywords
