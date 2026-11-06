@@ -13,7 +13,7 @@ import requests
 
 from comourat.clients.arxiv import ArxivClient
 from comourat.clients.semantic_scholar import SemanticScholarClient
-from comourat.enrichment.page_fetch import PageFetcher
+from comourat.enrichment.page_fetch import ArticleFetchError, PageFetcher
 from comourat.proxy import ProxyConfigurationError, validate_proxy_url
 
 
@@ -87,8 +87,9 @@ class TestPageFetcherFailsLoudly:
         session = self._session_raising(requests.exceptions.InvalidURL("bad url"))
         fetcher = PageFetcher(http_session=session)
         with caplog.at_level(logging.WARNING):
-            assert fetcher.fetch("https://example.com/") is None
-            assert fetcher.fetch("https://example.com/") is None
+            for _ in range(2):
+                with pytest.raises(ArticleFetchError):
+                    fetcher.fetch("https://example.com/")
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert len(warnings) == 1
         assert "every page request failed" in warnings[0].message
@@ -96,15 +97,23 @@ class TestPageFetcherFailsLoudly:
     def test_partial_failures_log_at_debug_only(self, caplog):
         session = MagicMock()
         response = MagicMock()
+        response.status_code = 200
+        response.url = "https://example.com/ok"
         response.text = (
-            "<html><body><p>Some content here for the reader.</p></body></html>"
+            "<html><head><title>Some title</title></head>"
+            "<body><p>Some content here for the reader.</p></body></html>"
         )
         response.raise_for_status.return_value = None
         session.get.side_effect = [requests.exceptions.Timeout("slow"), response]
         session.proxies = {}
-        fetcher = PageFetcher(http_session=session)
+        fetcher = PageFetcher(
+            http_session=session,
+            extractor=lambda html: "Some content",
+            title_extractor=lambda html: "Some title",
+        )
         with caplog.at_level(logging.DEBUG):
-            fetcher.fetch("https://example.com/")
+            with pytest.raises(ArticleFetchError):
+                fetcher.fetch("https://example.com/")
             fetcher.fetch("https://example.com/ok")
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert warnings == []

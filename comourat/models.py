@@ -208,6 +208,14 @@ class PaperInfoCollection(BaseModel):
     papers: list[PaperInfo]
 
 
+class ArticleResult(BaseModel):
+    """A research-related article with its source and extracted main text."""
+
+    title: str = Field(min_length=1)
+    source_url: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+
+
 class EnrichmentSuccess(BaseModel):
     """Successful enrichment that returned additional context."""
 

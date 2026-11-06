@@ -20,7 +20,9 @@ from comourat._fetch_transport import (
     _RequestState,
     _tls_context,
 )
+from comourat.enrichment.page_fetch import ArticleFetchError
 from comourat.fetch import FetchPolicy, FetchPolicyError, SafeHttpClient, _Deadline
+from comourat.models import ArticleResult
 
 
 class _TargetHandler(BaseHTTPRequestHandler):
@@ -487,11 +489,20 @@ def test_http_proxy_allowed_redirect_control(proxy_servers):
 def _entry_succeeded(kind, result):
     if kind == "search":
         return "Title: Proxy result" in result
+    if kind == "page":
+        return (
+            isinstance(result, ArticleResult)
+            and "Allowed proxy article content" in result.text
+        )
     return result is not None and "Allowed proxy article content" in result
 
 
 def _entry_failed(result):
-    return result is None or result.startswith("Error ")
+    return (
+        isinstance(result, ArticleFetchError)
+        or result is None
+        or (isinstance(result, str) and result.startswith("Error "))
+    )
 
 
 @pytest.mark.parametrize("kind", ["page", "extract", "search"])

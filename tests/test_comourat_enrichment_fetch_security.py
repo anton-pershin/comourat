@@ -15,9 +15,10 @@ import requests
 
 from comourat.collectors.paper_discoverer import PaperDiscovererCore
 from comourat.enrichment.enricher import EnrichmentAgent, create_enrichment_agent
-from comourat.enrichment.page_fetch import PageFetcher
+from comourat.enrichment.page_fetch import ArticleFetchError, PageFetcher
 from comourat.enrichment.web_tools import attach_web_tools
 from comourat.fetch import FetchPolicy
+from comourat.models import ArticleResult
 
 ARTICLE = b"""<html><body><article><h1>Control title</h1>
 <p>Allowed control article content provides enough useful text for extraction
@@ -108,7 +109,14 @@ def _context():
 def _entry_point(kind, resolver, monkeypatch):
     if kind == "page":
         fetcher = PageFetcher(fetch_policy=_LoopbackControlPolicy(), resolver=resolver)
-        return fetcher.fetch
+
+        def fetch_article(url):
+            try:
+                return fetcher.fetch(url)
+            except ArticleFetchError as exc:
+                return exc
+
+        return fetch_article
     agent = _Agent()
     attach_web_tools(
         agent,
@@ -133,14 +141,21 @@ def _path_for(kind, path=""):
 
 def _succeeded(kind, result):
     if kind == "page":
-        return result is not None and "Allowed control article content" in result
+        return (
+            isinstance(result, ArticleResult)
+            and "Allowed control article content" in result.text
+        )
     if kind == "extract":
         return "Allowed control article content" in result
     return "Title: Allowed control result" in result
 
 
 def _failed(result):
-    return result is None or result.startswith("Error ")
+    return (
+        isinstance(result, ArticleFetchError)
+        or result is None
+        or (isinstance(result, str) and result.startswith("Error "))
+    )
 
 
 @pytest.mark.parametrize("kind", ["page", "extract", "search"])
@@ -273,8 +288,9 @@ def test_page_fetch_logs_redact_target_credentials_paths_and_queries(caplog):
     )
     fetcher = PageFetcher(http_session=session)
     with caplog.at_level(logging.DEBUG):
-        fetcher.fetch("http://user:secret@example.com/generate?token=private")
-        fetcher.fetch("http://user:secret@example.com/generate?token=private")
+        for _ in range(2):
+            with pytest.raises(ArticleFetchError):
+                fetcher.fetch("http://user:secret@example.com/generate?token=private")
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "secret" not in messages
     assert "private" not in messages
