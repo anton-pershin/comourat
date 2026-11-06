@@ -47,6 +47,25 @@ for paper in page.papers:
 
 The OpenAlex client uses the public API when no API key is provided. Pass `api_key` to use an API key. Other clients and collectors accept their settings through constructor arguments. Do not put credentials in source control.
 
+## Example: get arXiv title and abstract
+
+```python
+from comourat.clients.arxiv import ArxivClient
+
+client = ArxivClient(user_agent="Your Project (contact@example.org)")
+paper = client.get_metadata("https://arxiv.org/pdf/1706.03762")
+
+if paper is not None:
+    print(paper.title)
+    print(paper.abstract)
+```
+
+`get_metadata` returns a `PaperRecord` with its arXiv identity, title, and abstract populated. Other record fields keep their defaults. It accepts current and legacy arXiv identifiers, with an optional `arXiv:` prefix and version suffix. It also accepts HTTP and HTTPS abstract and PDF URLs on `arxiv.org` and `www.arxiv.org`. PDF URLs can include `.pdf`; URL query strings and fragments are ignored.
+
+The client extracts the identifier locally and requests only the arXiv Atom API. It does not request or extract the paper body. An unknown paper with an empty Atom feed returns `None`. An invalid reference raises `ValueError`. Malformed XML or missing title or abstract fields raise `ArxivMetadataError`. After the configured retries, provider and transport failures remain explicit as `requests.HTTPError`, `requests.ConnectionError`, or `requests.Timeout`.
+
+Both `timeout_seconds` and `overall_timeout_seconds` default to 120 seconds. `timeout_seconds` is the connection and read timeout for each HTTP request. `overall_timeout_seconds` limits the complete operation, including HTTP requests, Atom response parsing, retries, backoff, and politeness delays. Each request and delay receives only the remaining time. Overall expiry raises `requests.Timeout`. These limits also apply to `get_title_by_id` and `search_by_title`.
+
 ## Package layout
 
 - `comourat.clients` — external content-source clients.

@@ -5,10 +5,14 @@ from comourat, proving the library works standalone (spec 22 AC1/AC2).
 """
 
 import json
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 import requests
 
+import comourat.clients.arxiv as arxiv_module
 from comourat.clients.arxiv import ArxivClient
 from comourat.clients.openalex import DEFAULT_SELECT_FIELDS, OpenAlexClient
 from comourat.models import PaperIdentity, normalize_arxiv_id, normalize_doi
@@ -21,7 +25,10 @@ def _make_client(http_client: MagicMock, **kwargs) -> OpenAlexClient:
 
 
 def _make_arxiv_client(http_client: MagicMock, **kwargs) -> ArxivClient:
-    defaults: dict = {"user_agent": "comourat-test/0.1 (mailto:test@example.com)"}
+    defaults: dict = {
+        "user_agent": "comourat-test/0.1 (mailto:test@example.com)",
+        "regular_delay_seconds": 0,
+    }
     defaults.update(kwargs)
     return ArxivClient(**defaults, http_client=http_client)
 
@@ -48,6 +55,30 @@ def _arxiv_response(text: str, status_code: int = 200) -> MagicMock:
             f"{status_code}", response=response
         )
     return response
+
+
+def _arxiv_metadata_feed(
+    title: str = "  A   multi\n    line   title ",
+    abstract: str = "  An   abstract\n    with   whitespace ",
+) -> str:
+    return (
+        '<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+        f"<title>{title}</title><summary>{abstract}</summary>"
+        "</entry></feed>"
+    )
+
+
+class _ControlledClock:
+    def __init__(self):
+        self.now = 0.0
+        self.delays = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, delay):
+        self.delays.append(delay)
+        self.now += delay
 
 
 class TestOpenAlexIdentityRetrieval:
@@ -161,3 +192,338 @@ class TestArxivClient:
         http_client = MagicMock()
         http_client.get.return_value = _arxiv_response("<feed></feed>")
         assert _make_arxiv_client(http_client).get_title_by_id("1706.03762") is None
+
+
+class TestArxivMetadata:
+    def test_current_identifier_returns_complete_paper_record(self):
+        http_client = MagicMock()
+        http_client.get.return_value = _arxiv_response(_arxiv_metadata_feed())
+
+        result = _make_arxiv_client(http_client).get_metadata("1706.03762")
+
+        assert result is not None
+        assert result.identity.arxiv_id == "1706.03762"
+        assert result.identity.doi is None
+        assert result.title == "A multi line title"
+        assert result.abstract == "An abstract with whitespace"
+        assert result.authors == []
+        assert result.publication_date is None
+        assert result.citation_count is None
+        assert result.raw_influence == {}
+        http_client.get.assert_called_once()
+        assert http_client.get.call_args.args[0] == arxiv_module.ARXIV_API_QUERY_URL
+        assert http_client.get.call_args.kwargs["params"] == {"id_list": "1706.03762"}
+
+    @pytest.mark.parametrize(
+        ("reference", "expected_id"),
+        [
+            ("arXiv:1706.03762v2", "1706.03762"),
+            (" 1706.03762 ", "1706.03762"),
+            ("hep-th/9901001v1", "hep-th/9901001"),
+        ],
+    )
+    def test_identifier_variants_are_normalized(self, reference, expected_id):
+        http_client = MagicMock()
+        http_client.get.return_value = _arxiv_response(_arxiv_metadata_feed())
+
+        result = _make_arxiv_client(http_client).get_metadata(reference)
+
+        assert result is not None
+        assert result.identity.arxiv_id == expected_id
+        assert http_client.get.call_args.kwargs["params"]["id_list"] == expected_id
+
+    @pytest.mark.parametrize(
+        ("reference", "expected_id"),
+        [
+            ("http://arxiv.org/abs/1706.03762", "1706.03762"),
+            ("https://www.arxiv.org/abs/1706.03762v2", "1706.03762"),
+            (
+                " https://arxiv.org/abs/1706.03762?context=cs#paper ",
+                "1706.03762",
+            ),
+            ("https://arxiv.org/pdf/1706.03762", "1706.03762"),
+            ("https://arxiv.org/pdf/1706.03762.pdf", "1706.03762"),
+            ("https://www.arxiv.org/pdf/1706.03762v2.pdf", "1706.03762"),
+            (
+                "https://arxiv.org/pdf/hep-th/9901001v1.pdf?download=1#view",
+                "hep-th/9901001",
+            ),
+            ("https://www.arxiv.org/abs/hep-th/9901001", "hep-th/9901001"),
+        ],
+    )
+    def test_urls_use_only_the_atom_api(self, reference, expected_id):
+        http_client = MagicMock()
+        http_client.get.return_value = _arxiv_response(_arxiv_metadata_feed())
+
+        result = _make_arxiv_client(http_client).get_metadata(reference)
+
+        assert result is not None
+        assert result.identity.arxiv_id == expected_id
+        http_client.get.assert_called_once()
+        assert http_client.get.call_args.args[0] == arxiv_module.ARXIV_API_QUERY_URL
+        assert http_client.get.call_args.kwargs["params"]["id_list"] == expected_id
+
+    @pytest.mark.parametrize(
+        "reference",
+        [
+            "",
+            "   ",
+            "not-an-id",
+            "1706.123",
+            "1706.03762v",
+            "arxiv:",
+            "ftp://arxiv.org/abs/1706.03762",
+            "https://example.org/abs/1706.03762",
+            "https://arxiv.org.evil.example/abs/1706.03762",
+            "https://arxiv.org@evil.example/abs/1706.03762",
+            "https://arxiv.org/search/?query=attention",
+            "https://arxiv.org/abs/",
+            "https://arxiv.org/abs/1706.03762/extra",
+            "https://arxiv.org/pdf/1706.03762.pdfx",
+            "https://arxiv.org/pdf/1706.03762v2.pdf.extra",
+        ],
+    )
+    def test_invalid_references_fail_without_http(self, reference):
+        http_client = MagicMock()
+
+        with pytest.raises(ValueError):
+            _make_arxiv_client(http_client).get_metadata(reference)
+
+        http_client.get.assert_not_called()
+
+    def test_unknown_paper_returns_none(self):
+        http_client = MagicMock()
+        http_client.get.return_value = _arxiv_response(
+            '<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+        )
+
+        assert _make_arxiv_client(http_client).get_metadata("1706.03762") is None
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            "<summary>An abstract</summary>",
+            "<title> </title><summary>An abstract</summary>",
+            "<title>A title</title>",
+            "<title>A title</title><summary> \n </summary>",
+        ],
+    )
+    def test_incomplete_metadata_is_explicit(self, entry):
+        http_client = MagicMock()
+        http_client.get.return_value = _arxiv_response(
+            f'<feed xmlns="http://www.w3.org/2005/Atom"><entry>{entry}</entry></feed>'
+        )
+
+        with pytest.raises(arxiv_module.ArxivMetadataError):
+            _make_arxiv_client(http_client).get_metadata("1706.03762")
+
+    def test_malformed_xml_is_explicit(self):
+        http_client = MagicMock()
+        http_client.get.return_value = _arxiv_response("<feed><entry></feed>")
+
+        with pytest.raises(arxiv_module.ArxivMetadataError) as exc_info:
+            _make_arxiv_client(http_client).get_metadata("1706.03762")
+
+        assert isinstance(exc_info.value.__cause__, ET.ParseError)
+
+    def test_non_retryable_http_failure_is_explicit(self):
+        http_client = MagicMock()
+        http_client.get.return_value = _arxiv_response("failure", status_code=400)
+
+        with pytest.raises(requests.HTTPError):
+            _make_arxiv_client(http_client, max_retries=0).get_metadata("1706.03762")
+
+        assert http_client.get.call_count == 1
+
+    @pytest.mark.parametrize("status_code", [429, 500])
+    def test_exhausted_http_retries_are_explicit(self, status_code):
+        http_client = MagicMock()
+        http_client.get.return_value = _arxiv_response(
+            "failure", status_code=status_code
+        )
+
+        with pytest.raises(requests.HTTPError):
+            _make_arxiv_client(
+                http_client, max_retries=2, backoff_seconds=0
+            ).get_metadata("1706.03762")
+
+        assert http_client.get.call_count == 3
+
+    @pytest.mark.parametrize(
+        "exception_type", [requests.ConnectionError, requests.Timeout]
+    )
+    def test_exhausted_transport_retries_are_explicit(self, exception_type):
+        http_client = MagicMock()
+        http_client.get.side_effect = exception_type("provider failure")
+
+        with pytest.raises(exception_type):
+            _make_arxiv_client(
+                http_client, max_retries=2, backoff_seconds=0
+            ).get_metadata("1706.03762")
+
+        assert http_client.get.call_count == 3
+
+    def test_timeout_defaults(self):
+        client = _make_arxiv_client(MagicMock())
+
+        assert client.timeout_seconds == 120.0
+        assert client.overall_timeout_seconds == 120.0
+
+    @pytest.mark.parametrize(
+        "value", [0, -1, float("nan"), float("inf"), True, "1", None]
+    )
+    @pytest.mark.parametrize("setting", ["timeout_seconds", "overall_timeout_seconds"])
+    def test_timeout_configuration_is_validated(self, setting, value):
+        http_client = MagicMock()
+
+        with pytest.raises(ValueError):
+            _make_arxiv_client(http_client, **{setting: value})
+
+        http_client.get.assert_not_called()
+
+    def test_each_request_receives_only_the_remaining_budget(self, monkeypatch):
+        clock = _ControlledClock()
+        monkeypatch.setattr(arxiv_module.time, "monotonic", clock.monotonic)
+        monkeypatch.setattr(arxiv_module.time, "sleep", clock.sleep)
+        http_client = MagicMock()
+        request_timeouts = []
+
+        def get(*args, **kwargs):
+            request_timeouts.append(kwargs["timeout"])
+            if len(request_timeouts) == 1:
+                clock.now += 5
+                return _arxiv_response("failure", status_code=500)
+            return _arxiv_response(_arxiv_metadata_feed())
+
+        http_client.get.side_effect = get
+        client = _make_arxiv_client(
+            http_client,
+            timeout_seconds=120,
+            overall_timeout_seconds=20,
+            max_retries=1,
+            backoff_seconds=0,
+        )
+
+        result = client.get_metadata("1706.03762")
+
+        assert result is not None
+        assert request_timeouts == [20, 15]
+
+    def test_overall_timeout_limits_backoff_and_stops_retries(self, monkeypatch):
+        clock = _ControlledClock()
+        monkeypatch.setattr(arxiv_module.time, "monotonic", clock.monotonic)
+        monkeypatch.setattr(arxiv_module.time, "sleep", clock.sleep)
+        http_client = MagicMock()
+
+        def get(*args, **kwargs):
+            clock.now += 4
+            return _arxiv_response("failure", status_code=500)
+
+        http_client.get.side_effect = get
+        client = _make_arxiv_client(
+            http_client,
+            timeout_seconds=20,
+            overall_timeout_seconds=10,
+            max_retries=1,
+            backoff_seconds=20,
+        )
+
+        with pytest.raises(requests.Timeout):
+            client.get_metadata("1706.03762")
+
+        assert http_client.get.call_count == 1
+        assert clock.delays == [6]
+
+    def test_overall_timeout_limits_politeness_delay(self, monkeypatch):
+        clock = _ControlledClock()
+        monkeypatch.setattr(arxiv_module.time, "monotonic", clock.monotonic)
+        monkeypatch.setattr(arxiv_module.time, "sleep", clock.sleep)
+        http_client = MagicMock()
+
+        def get(*args, **kwargs):
+            clock.now += 2
+            return _arxiv_response(_arxiv_metadata_feed())
+
+        http_client.get.side_effect = get
+        client = _make_arxiv_client(
+            http_client,
+            timeout_seconds=20,
+            overall_timeout_seconds=5,
+            max_retries=0,
+            regular_delay_seconds=10,
+        )
+
+        with pytest.raises(requests.Timeout):
+            client.get_metadata("1706.03762")
+
+        assert http_client.get.call_count == 1
+        assert clock.delays == [3]
+
+    def test_overall_timeout_includes_response_parsing(self, monkeypatch):
+        clock = _ControlledClock()
+        monkeypatch.setattr(arxiv_module.time, "monotonic", clock.monotonic)
+        monkeypatch.setattr(arxiv_module.time, "sleep", clock.sleep)
+        http_client = MagicMock()
+        http_client.get.return_value = _arxiv_response(_arxiv_metadata_feed())
+        original_fromstring = arxiv_module.ET.fromstring
+
+        def parse_and_advance(*args, **kwargs):
+            clock.now += 6
+            return original_fromstring(*args, **kwargs)
+
+        monkeypatch.setattr(arxiv_module.ET, "fromstring", parse_and_advance)
+        client = _make_arxiv_client(
+            http_client, timeout_seconds=20, overall_timeout_seconds=5
+        )
+
+        with pytest.raises(requests.Timeout):
+            client.get_metadata("1706.03762")
+
+    def test_title_search_remains_compatible(self):
+        feed_xml = (
+            '<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+            "<id>http://arxiv.org/abs/1706.03762v2</id>"
+            "<title> A   title </title><summary>An abstract</summary>"
+            "</entry></feed>"
+        )
+        http_client = MagicMock()
+        http_client.get.return_value = _arxiv_response(feed_xml)
+
+        result = _make_arxiv_client(http_client).search_by_title("A title")
+
+        assert result == ("1706.03762", "A title")
+        assert http_client.get.call_args.kwargs["params"] == {
+            "search_query": 'ti:"A title"',
+            "max_results": 1,
+        }
+
+    def test_existing_retry_policy_remains_compatible(self):
+        http_client = MagicMock()
+        http_client.get.side_effect = [
+            _arxiv_response("failure", status_code=500),
+            _arxiv_response(_arxiv_metadata_feed()),
+        ]
+
+        result = _make_arxiv_client(
+            http_client, max_retries=1, backoff_seconds=0
+        ).get_title_by_id("1706.03762")
+
+        assert result == "A multi line title"
+        assert http_client.get.call_count == 2
+
+    def test_readme_documents_metadata_contract(self):
+        readme = (Path(__file__).parents[1] / "README.md").read_text()
+
+        for text in [
+            "get_metadata",
+            "timeout_seconds",
+            "overall_timeout_seconds",
+            "ArxivMetadataError",
+            "requests.HTTPError",
+            "requests.ConnectionError",
+            "requests.Timeout",
+            "paper body",
+            "120",
+            "None",
+        ]:
+            assert text in readme
