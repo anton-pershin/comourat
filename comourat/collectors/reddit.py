@@ -211,7 +211,21 @@ class RedditSubmissionCollector:
     @staticmethod
     def _canonical_permalink(permalink: str, expected_id: str) -> str:
         try:
-            path = urlsplit(permalink.strip()).path
+            parts = urlsplit(permalink.strip())
+            port = parts.port
+            if parts.query or parts.fragment:
+                raise ValueError("permalink has unexpected query or fragment data")
+            if parts.scheme or parts.netloc:
+                hostname = (parts.hostname or "").rstrip(".").lower()
+                if (
+                    parts.scheme.lower() != "https"
+                    or not _host_matches(hostname, "reddit.com")
+                    or parts.username is not None
+                    or parts.password is not None
+                    or port not in {None, 443}
+                ):
+                    raise ValueError("absolute permalink is not a Reddit HTTPS URL")
+            path = parts.path
             if not path:
                 raise ValueError("permalink has no path")
             canonical_url = f"https://www.reddit.com/{path.lstrip('/')}"

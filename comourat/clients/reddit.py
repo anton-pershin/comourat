@@ -91,9 +91,26 @@ class RedditSubmissionClient:
             raise RuntimeError("Reddit submission request failed") from exc
 
         try:
-            return self._parse_response(response)
-        finally:
+            submission = self._parse_response(response)
+        except (LookupError, RuntimeError):
+            self._close_response(response, suppress_errors=True)
+            raise
+        except (requests.Timeout, TimeoutError) as exc:
+            self._close_response(response, suppress_errors=True)
+            raise TimeoutError("Reddit response processing timed out") from exc
+        except Exception as exc:
+            self._close_response(response, suppress_errors=True)
+            raise RuntimeError("Reddit returned an invalid response object") from exc
+        self._close_response(response)
+        return submission
+
+    @staticmethod
+    def _close_response(response: Any, *, suppress_errors: bool = False) -> None:
+        try:
             response.close()
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            if not suppress_errors:
+                raise RuntimeError("Reddit response cleanup failed") from exc
 
     @staticmethod
     def _parse_response(response: requests.Response) -> dict[str, Any]:

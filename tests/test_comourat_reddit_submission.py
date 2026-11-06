@@ -138,6 +138,20 @@ def test_collect_maps_canonical_permalink_and_all_model_fields():
     _assert_info_request(session)
 
 
+def test_absolute_reddit_permalink_is_normalized_to_the_canonical_host():
+    submission = _submission(
+        permalink="https://old.reddit.com/r/python/comments/abc123/a_specified_post/"
+    )
+    collector, _ = _collector(_response(payload=_payload(submission)))
+
+    result = collector.collect("abc123")
+
+    assert (
+        result.url
+        == "https://www.reddit.com/r/python/comments/abc123/a_specified_post/"
+    )
+
+
 def test_collect_accepts_link_post_with_empty_text():
     submission = _submission(selftext="", url="https://example.org/linked-content")
     collector, _ = _collector(_response(payload=_payload(submission)))
@@ -244,6 +258,59 @@ def test_provider_errors_raise_runtime_error_with_cause(provider_error):
     assert error.value.__cause__ is provider_error
 
 
+@pytest.mark.parametrize("malformed_response", [None, object()])
+def test_malformed_response_object_raises_runtime_error(malformed_response):
+    collector, session = _collector()
+    session.get.return_value = malformed_response
+
+    with pytest.raises(RuntimeError) as error:
+        collector.collect("abc123")
+
+    assert isinstance(error.value.__cause__, AttributeError)
+
+
+def test_missing_response_cleanup_interface_raises_runtime_error():
+    class ResponseWithoutClose:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return _payload(_submission())
+
+    collector, session = _collector()
+    session.get.return_value = ResponseWithoutClose()
+
+    with pytest.raises(RuntimeError) as error:
+        collector.collect("abc123")
+
+    assert isinstance(error.value.__cause__, AttributeError)
+
+
+def test_response_cleanup_failure_raises_runtime_error_with_cause():
+    response = _response(payload=_payload(_submission()))
+    close_error = AttributeError("close failed")
+    response.close.side_effect = close_error
+    collector, session = _collector()
+    session.get.return_value = response
+
+    with pytest.raises(RuntimeError) as error:
+        collector.collect("abc123")
+
+    assert error.value.__cause__ is close_error
+
+
+def test_cleanup_failure_does_not_mask_an_unavailable_submission():
+    response = _response(status=404)
+    response.close.side_effect = AttributeError("close failed")
+    collector, session = _collector()
+    session.get.return_value = response
+
+    with pytest.raises(LookupError) as error:
+        collector.collect("abc123")
+
+    assert isinstance(error.value.__cause__, requests.HTTPError)
+
+
 def test_malformed_json_raises_runtime_error_with_cause():
     json_error = ValueError("not JSON")
     collector, _ = _collector(_response(json_error=json_error))
@@ -295,6 +362,23 @@ def test_malformed_result_containers_raise_runtime_error(payload):
         ("created_utc", math.inf),
         ("permalink", None),
         ("permalink", "https://example.org/not-reddit"),
+        (
+            "permalink",
+            "https://example.org/r/python/comments/abc123/a_specified_post/",
+        ),
+        (
+            "permalink",
+            "http://www.reddit.com/r/python/comments/abc123/a_specified_post/",
+        ),
+        (
+            "permalink",
+            "https://www.reddit.com/r/python/comments/abc123/a_specified_post/?track=1",
+        ),
+        (
+            "permalink",
+            "https://www.reddit.com/r/python/comments/abc123/a_specified_post/#part",
+        ),
+        ("permalink", "//www.reddit.com/r/python/comments/abc123/a_post/"),
         ("permalink", "/r/python/comments/different/wrong_post/"),
         ("selftext", None),
         ("score", None),
