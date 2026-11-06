@@ -11,6 +11,7 @@ Comourat is a library, not a pipeline runner. Callers create and configure the c
 - Discover and expand paper candidates, including forward citation expansion, backward reference expansion, and title-based relevance search.
 - Resolve paper candidates to source records and check for matching arXiv PDF URLs.
 - Calculate post and citation influence scores and assess author authority.
+- Collect subreddit feeds or one specified Reddit post without collecting comments.
 - Search the web, extract page content, and add web-derived context to content items.
 - Use neutral Pydantic models for papers, posts, and enrichment results.
 - Enforce destination, redirect, DNS, trusted-proxy, and overall-deadline rules on article and enrichment fetches.
@@ -76,6 +77,43 @@ Both `timeout_seconds` and `overall_timeout_seconds` default to 120 seconds. `ti
 - `comourat.influence` — post, citation, and authority influence assessment.
 - `comourat.enrichment` — web search, page extraction, and content enrichment.
 
+## Collect one specified Reddit post
+
+Use `RedditSubmissionCollector` with a `RedditSubmissionClient` to collect one caller-selected post without collecting comments:
+
+```python
+from comourat.clients.reddit import RedditSubmissionClient
+from comourat.collectors.reddit import RedditSubmissionCollector
+
+client = RedditSubmissionClient(
+    user_agent="Your Project (contact@example.org)",
+    connection_timeout=10,
+    operation_timeout=30,
+)
+collector = RedditSubmissionCollector(client)
+post = collector.collect("https://www.reddit.com/r/python/comments/abc123/a_post/")
+print(post.title, post.url, post.text)
+```
+
+`collect` accepts a bare ASCII base36 submission ID, a Reddit comment permalink, a Reddit gallery URL, or a `redd.it` short URL. HTTP and HTTPS input URLs are accepted because Comourat extracts only the ID; it does not fetch the input URL. The URL must contain the submission ID directly. Mobile share URLs and other URLs that require resolution are not supported.
+
+The client requests only Reddit's `/api/info/` submission listing. It does not use PRAW's lazy submission loader, request a subreddit feed, or request comments. A link post with empty `selftext` is valid.
+
+The returned `RedditPostInfo` contains the subreddit, bare submission ID, title, author, UTC creation time, text, and score. Its `url` is the absolute `https://www.reddit.com` discussion permalink from the source response, even when the submission links to an external article.
+
+The default API base URL is `https://www.reddit.com`. Pass `api_url` to use another caller-selected Reddit API endpoint. Pass a configured Requests session as `http_session` when source authentication headers or other explicit session settings are needed. Use a separate session for each client. Environment proxy and timeout settings are not used.
+
+Failures have these public outcomes:
+
+- `ValueError`: invalid reference, user agent, API URL, or timeout configuration.
+- `LookupError`: unavailable, deleted, removed, empty, or mismatched submission.
+- `RuntimeError`: other provider, HTTP, JSON, response-format, or source-data failures.
+- `TimeoutError`: connection or overall operation timeout expiry.
+
+Translated exceptions preserve the original exception as `__cause__`. Failures never produce an empty or partial successful result.
+
+The connection timeout defaults to 10 seconds and applies to each connection attempt. The overall operation timeout defaults to 30 seconds and includes request preparation and authentication hooks, DNS resolution, connections, TLS handshakes, request and response transfer, redirects, and response-body reading. Each stage receives only the remaining overall time. A redirect, new connection, or response read does not restart it. Both values must be positive finite numbers.
+
 ## Protected web fetching
 
 `PageFetcher` and the web tools used by `create_enrichment_agent`, `EnrichmentAgent`, and `PaperDiscovererCore` use `SafeHttpClient`. The default `FetchPolicy` permits only HTTP and HTTPS targets with global unicast addresses. It rejects loopback, private, link-local, unspecified, multicast, reserved, carrier-grade NAT, and other non-global IPv4 and IPv6 addresses. IPv4-mapped IPv6 addresses are checked in both address families.
@@ -120,7 +158,7 @@ SOCKS4 supports only IPv4 targets. An IPv6 target through SOCKS4 is rejected bef
 
 Each top-level request has one monotonic overall deadline. The default is 30 seconds. DNS resolution, direct and proxy connections, proxy negotiation, TLS handshakes, request and response transfer, response-body reading, redirects, retries, and retry delays all consume the same budget. Each stage receives only the remaining time. A slow peer cannot restart the timeout by sending data slowly.
 
-The default redirect limit is 30 and automatic retries are disabled (`max_retries=0`). `PageFetcher(timeout=...)` remains available as an alias for configuring the default policy timeout. Do not pass `timeout` and `fetch_policy` together.
+The default redirect limit is 30 and automatic retries are disabled (`max_retries=0`). `FetchPolicy(connection_timeout=...)` optionally caps each connection attempt without exceeding the remaining overall time. Its default `None` preserves the overall-timeout-only behavior. `PageFetcher(timeout=...)` remains available as an alias for configuring the default policy timeout. Do not pass `timeout` and `fetch_policy` together.
 
 `SafeHttpClient` raises `FetchPolicyError` for local policy denials, `FetchResolutionError` for resolution failures, and `FetchDeadlineExceeded` when the overall deadline expires. Proxy-enforced denials can appear as proxy or HTTP errors. No failure selects an unprotected direct or proxy fallback. Logs and client exceptions remove URL userinfo, paths, queries, and proxy credentials. Existing `PageFetcher` and enrichment-tool result contracts remain unchanged.
 

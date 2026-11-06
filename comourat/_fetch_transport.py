@@ -57,21 +57,27 @@ def _contains_deadline_error(error: BaseException | None) -> bool:
 
 
 class _DeadlineTimeout(Timeout):
-    """urllib3 timeout view that always returns the remaining overall time."""
+    """Timeout view bounded by connection and remaining overall time."""
 
-    def __init__(self, deadline: _Deadline) -> None:
+    def __init__(
+        self, deadline: _Deadline, connection_timeout: float | None = None
+    ) -> None:
         self.deadline = deadline
+        self.connection_timeout = connection_timeout
         super().__init__(total=None, connect=None, read=None)
 
     def clone(self):
-        return _DeadlineTimeout(self.deadline)
+        return _DeadlineTimeout(self.deadline, self.connection_timeout)
 
     @property
     def connect_timeout(self):
         try:
-            return self.deadline.remaining()
+            remaining = self.deadline.remaining()
         except _DeadlineExceeded:
             return 0
+        if self.connection_timeout is None:
+            return remaining
+        return min(self.connection_timeout, remaining)
 
     @property
     def read_timeout(self):
@@ -535,7 +541,7 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
                 deadline=deadline,
                 proxy=proxy_state,
             )
-            timeout = _DeadlineTimeout(deadline)
+            timeout = _DeadlineTimeout(deadline, self.policy.connection_timeout)
             return super().send(
                 request,
                 stream=stream,
