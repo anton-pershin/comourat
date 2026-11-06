@@ -229,6 +229,7 @@ def test_create_enrichment_agent_passes_fetch_dependencies(monkeypatch):
     assert create_enrichment_agent(MagicMock(), **dependencies) is agent
     assert attach.call_args.kwargs == {
         "tool_call_rejection_buffer": 4,
+        "raise_on_error": True,
         **dependencies,
     }
 

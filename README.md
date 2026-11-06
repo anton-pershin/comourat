@@ -13,6 +13,7 @@ Comourat is a library, not a pipeline runner. Callers create and configure the c
 - Calculate post and citation influence scores and assess author authority.
 - Collect subreddit feeds or one specified Reddit post without collecting comments.
 - Search the web, extract page content, and add web-derived context to content items.
+- Distinguish enrichment context, successful no-context, and sanitized failure results.
 - Summarize content through explicit success, empty-summary, provider-failure, and timeout results.
 - Use neutral Pydantic models for papers, posts, and enrichment results.
 - Enforce destination, redirect, DNS, trusted-proxy, and overall-deadline rules on article and enrichment fetches.
@@ -21,7 +22,7 @@ Comourat is a library, not a pipeline runner. Callers create and configure the c
 
 - Python 3.12 or later.
 - Requests 2.32.3 or later and urllib3 2.x for protected fetching.
-- pydantic-ai 2.64.0 or later for public summarization with overall deadlines.
+- pydantic-ai 2.64.0 or later for public enrichment and summarization with overall deadlines.
 
 ## Install from a checkout
 
@@ -116,6 +117,60 @@ Translated exceptions preserve the original exception as `__cause__`. Failures n
 
 The connection timeout defaults to 10 seconds and applies to each connection attempt. The overall operation timeout defaults to 30 seconds and includes request preparation and authentication hooks, DNS resolution, connections, TLS handshakes, request and response transfer, redirects, and response-body reading. Each stage receives only the remaining overall time. A redirect, new connection, or response read does not restart it. Both values must be positive finite numbers.
 
+## Public enrichment
+
+Use `EnrichmentAgent.enrich` to gather web-derived context with a caller-configured `pydantic-ai` model. Pass the model, prompt, and optional settings directly. Comourat does not read provider credentials or timeout settings from environment variables or configuration files.
+
+```python
+from comourat.enrichment.enricher import EnrichmentAgent
+from comourat.models import (
+    EmptyEnrichment,
+    EnrichmentFailure,
+    EnrichmentSuccess,
+)
+
+enricher = EnrichmentAgent(
+    model,  # A pydantic-ai Model configured by the caller.
+    overall_timeout=120,
+)
+result = enricher.enrich(prompt)
+
+if isinstance(result, EnrichmentSuccess):
+    context_points = result.additional_context
+elif isinstance(result, EmptyEnrichment):
+    context_points = []
+else:
+    assert isinstance(result, EnrichmentFailure)
+    error_category = result.error_category
+    error_message = result.error_message
+```
+
+The public result types are Pydantic models. `EnrichmentResult` is their discriminated union. The `outcome` field identifies each result:
+
+| Result | Meaning |
+|---|---|
+| `EnrichmentSuccess(outcome="context")` | Enrichment succeeded and `additional_context` contains one or more context points. |
+| `EmptyEnrichment(outcome="no_context")` | Enrichment succeeded and `additional_context` is empty. This is not a failure. |
+| `EnrichmentFailure(outcome="failure")` | Search, fetch, provider, usage-limit, or timeout failure. No successful empty result is returned. |
+
+A successful search with no results and a successful extraction with no extractable content are normal tool outcomes. They do not cause a failure by themselves. Search and extraction exceptions are not returned as ordinary text to the model. They produce failure results instead.
+
+Failure categories and messages are fixed:
+
+| `error_category` | `error_message` |
+|---|---|
+| `search` | `Enrichment web search failed.` |
+| `fetch` | `Enrichment URL extraction failed.` |
+| `provider` | `Enrichment provider failed.` |
+| `usage_limit` | `Enrichment usage limit exceeded.` |
+| `timeout` | `Enrichment exceeded the overall deadline.` |
+
+Public failures do not contain exception objects, provider error text, credentials, request data, prompts, sensitive URL components, or raw responses.
+
+`overall_timeout` defaults to 120 seconds. One monotonic deadline covers each complete agent run, including model requests, web tools, and output validation. The agent receives only the remaining time. Output produced after the deadline returns the `timeout` failure instead of a context or no-context result. The configured `FetchPolicy` continues to bound each HTTP request within the agent run.
+
+`overall_timeout` must be a positive finite number. Zero, negative, non-finite, non-numeric, and Boolean values raise `ValueError` before Comourat creates an agent.
+
 ## Public summarization
 
 Use `comourat.enrichment.summarizer.summarize` to summarize content with a caller-configured `pydantic-ai` model. Pass the model and content directly. Optional arguments configure the system prompt, model settings, non-empty policy, retries, retry delay, and overall timeout. Comourat does not read these settings or provider credentials from environment variables or configuration files.
@@ -208,7 +263,7 @@ Each top-level request has one monotonic overall deadline. The default is 30 sec
 
 The default redirect limit is 30 and automatic retries are disabled (`max_retries=0`). `FetchPolicy(connection_timeout=...)` optionally caps each connection attempt without exceeding the remaining overall time. Its default `None` preserves the overall-timeout-only behavior. `PageFetcher(timeout=...)` remains available as an alias for configuring the default policy timeout. Do not pass `timeout` and `fetch_policy` together.
 
-`SafeHttpClient` raises `FetchPolicyError` for local policy denials, `FetchResolutionError` for resolution failures, and `FetchDeadlineExceeded` when the overall deadline expires. Proxy-enforced denials can appear as proxy or HTTP errors. No failure selects an unprotected direct or proxy fallback. Logs and client exceptions remove URL userinfo, paths, queries, and proxy credentials. Existing `PageFetcher` and enrichment-tool result contracts remain unchanged.
+`SafeHttpClient` raises `FetchPolicyError` for local policy denials, `FetchResolutionError` for resolution failures, and `FetchDeadlineExceeded` when the overall deadline expires. Proxy-enforced denials can appear as proxy or HTTP errors. No failure selects an unprotected direct or proxy fallback. Logs and client exceptions remove URL userinfo, paths, queries, and proxy credentials. The existing `PageFetcher` result contract remains unchanged. `EnrichmentAgent` converts protected search and fetch exceptions into the public failure results described above. Direct `attach_web_tools` use keeps its string-returning default for other agents, including paper discovery.
 
 ## Tests
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Literal
 
 from bs4 import BeautifulSoup
 from pydantic_ai import Agent
@@ -23,6 +24,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
 DEFAULT_SEARCH_URL = "https://lite.duckduckgo.com/lite/"
+
+
+class _WebToolError(RuntimeError):
+    """A sanitized web-tool failure with a stable public category."""
+
+    def __init__(self, error_category: Literal["search", "fetch"]) -> None:
+        super().__init__(error_category)
+        self.error_category = error_category
 
 
 def _ensure_tool_call_within_buffer(
@@ -55,6 +64,7 @@ def attach_web_tools(
     proxy: str | None = None,
     fetch_policy: FetchPolicy | None = None,
     resolver: Resolver | None = None,
+    raise_on_error: bool = False,
 ) -> Agent[Model]:
     """Attach `web_search` and `extract_url` tools to an agent.
 
@@ -62,6 +72,8 @@ def attach_web_tools(
     usage from the run context only). Each tool updates the accumulator
     attribute `agent._comourat_tool_time_total` after every call via the shared
     `nonlocal` closure, so per-item timing stays live after tool calls.
+    When `raise_on_error` is true, tool exceptions become categorized
+    `_WebToolError` exceptions instead of ordinary model text.
     """
     tool_time_total = 0.0
     http_client = SafeHttpClient(
@@ -92,6 +104,8 @@ def attach_web_tools(
                 return content
             return f"No extractable content found at {_redact_url(url)}"
         except Exception as e:  # pylint: disable=broad-exception-caught
+            if raise_on_error:
+                raise _WebToolError("fetch") from e
             return f"Error extracting {_redact_url(url)}: {type(e).__name__}"
         finally:
             tool_time_total += time.monotonic() - t_tool
@@ -133,6 +147,8 @@ def attach_web_tools(
                 return "No results found for the web search"
             return "\n\n".join(results)
         except Exception as e:  # pylint: disable=broad-exception-caught
+            if raise_on_error:
+                raise _WebToolError("search") from e
             return f"Error during web search: {type(e).__name__}"
         finally:
             tool_time_total += time.monotonic() - t_tool
