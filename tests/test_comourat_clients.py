@@ -212,9 +212,7 @@ class TestArxivMetadata:
         assert result.raw_influence == {}
         http_client.get.assert_called_once()
         assert http_client.get.call_args.args[0] == arxiv_module.ARXIV_API_QUERY_URL
-        assert http_client.get.call_args.kwargs["params"] == {
-            "id_list": "1706.03762"
-        }
+        assert http_client.get.call_args.kwargs["params"] == {"id_list": "1706.03762"}
 
     @pytest.mark.parametrize(
         ("reference", "expected_id"),
@@ -333,9 +331,7 @@ class TestArxivMetadata:
         http_client.get.return_value = _arxiv_response("failure", status_code=400)
 
         with pytest.raises(requests.HTTPError):
-            _make_arxiv_client(http_client, max_retries=0).get_metadata(
-                "1706.03762"
-            )
+            _make_arxiv_client(http_client, max_retries=0).get_metadata("1706.03762")
 
         assert http_client.get.call_count == 1
 
@@ -353,7 +349,9 @@ class TestArxivMetadata:
 
         assert http_client.get.call_count == 3
 
-    @pytest.mark.parametrize("exception_type", [requests.ConnectionError, requests.Timeout])
+    @pytest.mark.parametrize(
+        "exception_type", [requests.ConnectionError, requests.Timeout]
+    )
     def test_exhausted_transport_retries_are_explicit(self, exception_type):
         http_client = MagicMock()
         http_client.get.side_effect = exception_type("provider failure")
