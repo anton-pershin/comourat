@@ -68,6 +68,22 @@ def _arxiv_metadata_feed(
     )
 
 
+def _arxiv_error_feed(marker: str) -> str:
+    error_url = "http://arxiv.org/api/errors#incorrect_id_format_for_1234.12345"
+    entry_id = error_url if marker == "id" else "http://arxiv.org/abs/1234.12345"
+    link = (
+        ""
+        if marker == "id"
+        else f'<link href="{error_url}" rel="alternate" type="text/html"/>'
+    )
+    return (
+        '<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+        f"<id>{entry_id}</id><title>Error</title>"
+        "<summary>  incorrect id format\n for 1234.12345 </summary>"
+        f"{link}</entry></feed>"
+    )
+
+
 class _ControlledClock:
     def __init__(self):
         self.now = 0.0
@@ -192,6 +208,40 @@ class TestArxivClient:
         http_client = MagicMock()
         http_client.get.return_value = _arxiv_response("<feed></feed>")
         assert _make_arxiv_client(http_client).get_title_by_id("1706.03762") is None
+
+    @pytest.mark.parametrize("method_name", ["get_metadata", "get_title_by_id"])
+    @pytest.mark.parametrize("marker", ["id", "link"])
+    def test_provider_error_entry_is_explicit(self, method_name, marker):
+        http_client = MagicMock()
+        http_client.get.return_value = _arxiv_response(_arxiv_error_feed(marker))
+        client = _make_arxiv_client(http_client)
+
+        with pytest.raises(arxiv_module.ArxivMetadataError) as exc_info:
+            getattr(client, method_name)("1234.12345")
+
+        assert "incorrect id format for 1234.12345" in str(exc_info.value)
+
+    @pytest.mark.parametrize("method_name", ["get_metadata", "get_title_by_id"])
+    def test_paper_titled_error_is_not_a_provider_error(self, method_name):
+        feed_xml = (
+            '<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+            "<id>http://arxiv.org/abs/1706.03762v2</id>"
+            '<link href="http://arxiv.org/abs/1706.03762v2" rel="alternate"/>'
+            "<title>Error</title><summary>A real paper abstract</summary>"
+            "</entry></feed>"
+        )
+        http_client = MagicMock()
+        http_client.get.return_value = _arxiv_response(feed_xml)
+        client = _make_arxiv_client(http_client)
+
+        result = getattr(client, method_name)("1706.03762")
+
+        if method_name == "get_metadata":
+            assert result is not None
+            assert result.title == "Error"
+            assert result.abstract == "A real paper abstract"
+        else:
+            assert result == "Error"
 
 
 class TestArxivMetadata:
@@ -525,5 +575,9 @@ class TestArxivMetadata:
             "paper body",
             "120",
             "None",
+            "get_title_by_id",
+            "/api/errors",
+            "provider summary",
+            "titled `Error`",
         ]:
             assert text in readme

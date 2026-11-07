@@ -35,7 +35,25 @@ _ARXIV_HOSTS = {"arxiv.org", "www.arxiv.org"}
 
 
 class ArxivMetadataError(RuntimeError):
-    """arXiv returned malformed XML or incomplete paper metadata."""
+    """arXiv returned an error entry or unusable paper metadata."""
+
+
+def _has_error_path(url: str | None) -> bool:
+    return bool(url and urlsplit(url.strip()).path == "/api/errors")
+
+
+def _raise_for_provider_error(entry: ET.Element) -> None:
+    urls = [entry.findtext("a:id", namespaces=ATOM_NS)]
+    urls.extend(
+        link.get("href") for link in entry.findall("a:link", namespaces=ATOM_NS)
+    )
+    if not any(_has_error_path(url) for url in urls):
+        return
+    summary = " ".join((entry.findtext("a:summary", namespaces=ATOM_NS) or "").split())
+    message = "arXiv API returned a provider error"
+    if summary:
+        message = f"{message}: {summary}"
+    raise ArxivMetadataError(message)
 
 
 def _validate_timeout(name: str, value: float) -> float:
@@ -215,8 +233,9 @@ class ArxivClient:
 
         Abstract and PDF URLs are parsed locally. Only the normalized identifier
         is sent to the Atom API; the paper body is never requested. An empty
-        feed returns `None`. Invalid references raise `ValueError`, and unusable
-        Atom responses raise `ArxivMetadataError`.
+        feed returns `None`. Invalid references raise `ValueError`. Provider
+        error entries and unusable Atom responses raise `ArxivMetadataError`.
+        The exception includes the provider summary for an error entry.
         """
         arxiv_id = _normalize_reference(reference)
         deadline = self._start_operation()
@@ -234,6 +253,7 @@ class ArxivClient:
         if entry is None:
             self._remaining(deadline)
             return None
+        _raise_for_provider_error(entry)
         title = " ".join((entry.findtext("a:title", namespaces=ATOM_NS) or "").split())
         abstract = " ".join(
             (entry.findtext("a:summary", namespaces=ATOM_NS) or "").split()
@@ -253,14 +273,20 @@ class ArxivClient:
         """Return the title of an arXiv id, or None when the feed is empty.
 
         An unknown arXiv id returns a normal `<feed>` with zero `<entry>`s —
-        no 404 — so an empty feed is "not found", not an error.
+        no 404 — so an empty feed is "not found", not an error. Provider error
+        entries raise `ArxivMetadataError` with the provider summary.
         """
         deadline = self._start_operation()
         response = self._get(
             ARXIV_API_QUERY_URL, params={"id_list": arxiv_id}, _deadline=deadline
         )
         root = self._parse_xml(response.text, deadline)
-        title = root.findtext("a:entry/a:title", namespaces=ATOM_NS)
+        entry = root.find("a:entry", namespaces=ATOM_NS)
+        if entry is None:
+            self._remaining(deadline)
+            return None
+        _raise_for_provider_error(entry)
+        title = entry.findtext("a:title", namespaces=ATOM_NS)
         self._remaining(deadline)
         if title is None:
             return None
