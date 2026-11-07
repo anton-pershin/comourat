@@ -5,6 +5,7 @@
 | Content item | Research-related content that a library component collects or processes. |
 | Content source | An external service or resource that provides content. |
 | Content-source client | A component that communicates with a content source. |
+| Provider error entry | A content-source response entry that reports a source failure instead of a content item. |
 | Content collector | A component that collects content from one or more sources. |
 | Content processing | An operation that resolves, assesses, verifies, or enriches collected content. |
 | Data model | A structured representation of data exchanged by library components. |
