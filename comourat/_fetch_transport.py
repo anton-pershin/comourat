@@ -56,8 +56,16 @@ def _contains_deadline_error(error: BaseException | None) -> bool:
     return False
 
 
+def _read_timeout_remaining(deadline: _Deadline) -> float:
+    remaining = deadline.remaining()
+    read_timeout = getattr(deadline, "read_timeout", None)
+    if read_timeout is None:
+        return remaining
+    return min(read_timeout, remaining)
+
+
 class _DeadlineTimeout(Timeout):
-    """Timeout view bounded by connection and remaining overall time."""
+    """Timeout view bounded by connection, read, and overall time."""
 
     def __init__(
         self, deadline: _Deadline, connection_timeout: float | None = None
@@ -82,7 +90,7 @@ class _DeadlineTimeout(Timeout):
     @property
     def read_timeout(self):
         try:
-            return self.deadline.remaining()
+            return _read_timeout_remaining(self.deadline)
         except _DeadlineExceeded:
             return 0
 
@@ -184,7 +192,7 @@ class _DeadlineReader:
         self._deadline = deadline
 
     def _refresh(self) -> None:
-        self._socket.settimeout(self._deadline.remaining())
+        self._socket.settimeout(_read_timeout_remaining(self._deadline))
 
     def read(self, *args, **kwargs):
         self._refresh()
@@ -270,6 +278,9 @@ class _DeadlineSocket(socket.socket):
     def _refresh(self) -> None:
         super().settimeout(self._comourat_deadline.remaining())
 
+    def _refresh_read(self) -> None:
+        super().settimeout(_read_timeout_remaining(self._comourat_deadline))
+
     def _refresh_connection(self) -> None:
         super().settimeout(
             _connection_timeout_remaining(
@@ -292,11 +303,11 @@ class _DeadlineSocket(socket.socket):
         return super().sendall(*args, **kwargs)
 
     def recv(self, *args, **kwargs):
-        self._refresh()
+        self._refresh_read()
         return super().recv(*args, **kwargs)
 
     def recv_into(self, *args, **kwargs):
-        self._refresh()
+        self._refresh_read()
         return super().recv_into(*args, **kwargs)
 
 
@@ -382,6 +393,9 @@ class _PinnedSocksSocket(socks.socksocket):
     def _refresh(self) -> None:
         super().settimeout(self._comourat_deadline.remaining())
 
+    def _refresh_read(self) -> None:
+        super().settimeout(_read_timeout_remaining(self._comourat_deadline))
+
     def _refresh_connection(self) -> None:
         super().settimeout(
             _connection_timeout_remaining(
@@ -407,11 +421,11 @@ class _PinnedSocksSocket(socks.socksocket):
         return super().sendall(*args, **kwargs)
 
     def recv(self, *args, **kwargs):
-        self._refresh()
+        self._refresh_read()
         return super().recv(*args, **kwargs)
 
     def recv_into(self, *args, **kwargs):
-        self._refresh()
+        self._refresh_read()
         return super().recv_into(*args, **kwargs)
 
     def makefile(self, mode="r", buffering=None, **kwargs):
