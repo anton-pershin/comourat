@@ -41,7 +41,7 @@ class FetchPolicyError(FetchError):
     """A URL or destination violates the configured fetch policy."""
 
 
-class FetchResolutionError(FetchError):
+class FetchResolutionError(requests.ConnectionError, FetchError):
     """A hostname cannot be resolved into a usable answer set."""
 
 

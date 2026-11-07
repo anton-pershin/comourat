@@ -98,15 +98,21 @@ class _DeadlineTimeout(Timeout):
 class _DeadlineSSLContext:
     """Delegate SSLContext behavior and register sockets before handshakes."""
 
-    def __init__(self, context, deadline: _Deadline) -> None:
+    def __init__(
+        self,
+        context,
+        deadline: _Deadline,
+        connection_timeout: float | None = None,
+    ) -> None:
         object.__setattr__(self, "_context", context)
         object.__setattr__(self, "_deadline", deadline)
+        object.__setattr__(self, "_connection_timeout", connection_timeout)
 
     def __getattr__(self, name):
         return getattr(self._context, name)
 
     def __setattr__(self, name, value) -> None:
-        if name in {"_context", "_deadline"}:
+        if name in {"_context", "_deadline", "_connection_timeout"}:
             object.__setattr__(self, name, value)
         else:
             setattr(self._context, name, value)
@@ -117,11 +123,23 @@ class _DeadlineSSLContext:
         tls_socket = self._context.wrap_socket(sock, *args, **kwargs)
         self._deadline.register(tls_socket)
         if do_handshake:
+            if self._connection_timeout is not None:
+                tls_socket.settimeout(
+                    _connection_timeout_remaining(
+                        self._deadline, self._connection_timeout
+                    )
+                )
             tls_socket.do_handshake()
+            if self._connection_timeout is not None:
+                tls_socket.settimeout(self._deadline.remaining())
         return tls_socket
 
 
-def _tls_context(pool_kwargs, deadline: _Deadline):
+def _tls_context(
+    pool_kwargs,
+    deadline: _Deadline,
+    connection_timeout: float | None = None,
+):
     # Requests reuses a process-global preloaded SSLContext. Never wrap or
     # mutate it: each target and proxy needs independent trust state.
     context = create_urllib3_context(
@@ -130,7 +148,7 @@ def _tls_context(pool_kwargs, deadline: _Deadline):
         ssl_maximum_version=pool_kwargs.get("ssl_maximum_version"),
         cert_reqs=resolve_cert_reqs(pool_kwargs.get("cert_reqs")),
     )
-    return _DeadlineSSLContext(context, deadline)
+    return _DeadlineSSLContext(context, deadline, connection_timeout)
 
 
 class _DeadlineRetry(Retry):
@@ -650,7 +668,9 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
             for key in SSL_KEYWORDS:
                 pool_kwargs.pop(key, None)
         else:
-            pool_kwargs["ssl_context"] = _tls_context(pool_kwargs, state.deadline)
+            pool_kwargs["ssl_context"] = _tls_context(
+                pool_kwargs, state.deadline, self.policy.connection_timeout
+            )
         pool_class = (
             _PinnedHTTPSConnectionPool
             if state.target.scheme == "https"
@@ -680,8 +700,12 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
                 pool_kwargs.pop(key, None)
         else:
             if proxy.target.scheme == "https":
-                proxy_ssl_context = _tls_context(pool_kwargs, state.deadline)
-            pool_kwargs["ssl_context"] = _tls_context(pool_kwargs, state.deadline)
+                proxy_ssl_context = _tls_context(
+                    pool_kwargs, state.deadline, self.policy.connection_timeout
+                )
+            pool_kwargs["ssl_context"] = _tls_context(
+                pool_kwargs, state.deadline, self.policy.connection_timeout
+            )
         pool_class = (
             _PinnedHTTPSConnectionPool
             if pool_scheme == "https"
@@ -710,7 +734,9 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
             for key in SSL_KEYWORDS:
                 pool_kwargs.pop(key, None)
         else:
-            pool_kwargs["ssl_context"] = _tls_context(pool_kwargs, state.deadline)
+            pool_kwargs["ssl_context"] = _tls_context(
+                pool_kwargs, state.deadline, self.policy.connection_timeout
+            )
         username, password = get_auth_from_url(proxy.url)
         socks_options = {
             "socks_version": (

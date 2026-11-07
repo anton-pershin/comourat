@@ -162,6 +162,8 @@ class ArxivClient:
                 fetch_policy=policy,
                 proxy=self.proxy,
             )
+        elif isinstance(http_client, SafeHttpClient):
+            self._safe_client = http_client
 
     def _start_operation(self) -> _Deadline:
         return _Deadline.start(

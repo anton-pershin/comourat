@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import queue
 import socket
 import socketserver
 import threading
@@ -346,6 +347,7 @@ def test_safe_client_reuses_but_does_not_close_an_external_deadline(monkeypatch)
         assert result is response
         assert observed_deadlines == [deadline]
         assert deadline.remaining() > 0
+        assert deadline._active
     finally:
         deadline.close()
 
@@ -656,6 +658,40 @@ def test_arxiv_default_transport_uses_safe_http_client():
     assert isinstance(client._safe_client, SafeHttpClient)
 
 
+def test_injected_safe_client_uses_arxiv_operation_deadline(
+    server_factory, monkeypatch
+):
+    server = server_factory(_send_arxiv)
+    release_resolver = threading.Event()
+
+    def resolver(host, port):
+        release_resolver.wait(1)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.2", port))]
+
+    safe_client = SafeHttpClient(
+        fetch_policy=_LoopbackControlPolicy(overall_timeout=0.5),
+        resolver=resolver,
+    )
+    monkeypatch.setattr(
+        arxiv_module,
+        "ARXIV_API_QUERY_URL",
+        f"http://slow-dns.test:{server.server_port}/api/query",
+    )
+    client = _arxiv_deadline_client(
+        http_client=safe_client,
+        overall_timeout_seconds=0.05,
+    )
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(requests.Timeout):
+            client.get_metadata("1706.03762")
+        assert time.monotonic() - started < 0.25
+    finally:
+        release_resolver.set()
+    assert server.calls == 0
+
+
 def test_arxiv_blocking_dns_uses_operation_deadline(
     arxiv_controlled_transport, server_factory, monkeypatch
 ):
@@ -674,6 +710,16 @@ def test_arxiv_blocking_dns_uses_operation_deadline(
         "ARXIV_API_QUERY_URL",
         f"http://slow-dns.test:{server.server_port}/api/query",
     )
+    resolver_result_put = threading.Event()
+    original_queue = queue.Queue
+
+    class ObservedQueue(original_queue):
+        def put(self, *args, **kwargs):
+            result = super().put(*args, **kwargs)
+            resolver_result_put.set()
+            return result
+
+    monkeypatch.setattr("comourat.fetch.queue.Queue", ObservedQueue)
     client = _arxiv_deadline_client(overall_timeout_seconds=0.05)
 
     started = time.monotonic()
@@ -685,14 +731,46 @@ def test_arxiv_blocking_dns_uses_operation_deadline(
         assert elapsed < 0.5
     finally:
         release_resolver.set()
-    time.sleep(0.02)
+    assert resolver_result_put.wait(1)
+    assert server.calls == 0
+
+
+def test_arxiv_dns_failures_use_existing_retry_policy(
+    arxiv_controlled_transport, server_factory, monkeypatch
+):
+    server = server_factory(_send_arxiv)
+    resolver_calls = []
+
+    def resolver(host, port):
+        resolver_calls.append((host, port))
+        raise socket.gaierror("controlled DNS failure")
+
+    arxiv_controlled_transport(resolver)
+    monkeypatch.setattr(
+        arxiv_module,
+        "ARXIV_API_QUERY_URL",
+        f"http://slow-dns.test:{server.server_port}/api/query",
+    )
+    client = _arxiv_deadline_client(
+        overall_timeout_seconds=0.5,
+        max_retries=2,
+        backoff_seconds=0,
+    )
+
+    with pytest.raises(requests.ConnectionError):
+        client.get_metadata("1706.03762")
+
+    assert len(resolver_calls) == 3
     assert server.calls == 0
 
 
 def test_arxiv_redirect_consumes_operation_deadline(
     arxiv_controlled_transport, server_factory, monkeypatch
 ):
+    final_response_sent = threading.Event()
+
     def behavior(handler):
+        time.sleep(0.2 if handler.path.startswith("/redirect") else 0.3)
         if handler.path.startswith("/redirect"):
             handler.send_response(302)
             handler.send_header("Location", "/slow")
@@ -700,7 +778,7 @@ def test_arxiv_redirect_consumes_operation_deadline(
             handler.send_header("Connection", "close")
             handler.end_headers()
             return
-        time.sleep(0.15)
+        final_response_sent.set()
         _send_arxiv(handler)
 
     server = server_factory(behavior)
@@ -710,21 +788,26 @@ def test_arxiv_redirect_consumes_operation_deadline(
         "ARXIV_API_QUERY_URL",
         f"http://127.0.0.2:{server.server_port}/redirect",
     )
-    client = _arxiv_deadline_client(overall_timeout_seconds=0.06)
+    client = _arxiv_deadline_client(overall_timeout_seconds=0.35)
 
     started = time.monotonic()
     with pytest.raises(requests.Timeout):
         client.get_metadata("1706.03762")
 
-    assert time.monotonic() - started < 0.5
+    assert time.monotonic() - started < 0.55
     assert server.calls == 2
+    assert not final_response_sent.is_set()
 
 
 def test_arxiv_retries_share_one_operation_deadline(
     arxiv_controlled_transport, server_factory, monkeypatch
 ):
+    final_response_sent = threading.Event()
+
     def behavior(handler):
-        time.sleep(0.08)
+        time.sleep(0.2 if handler.server.calls == 1 else 0.3)
+        if handler.server.calls == 2:
+            final_response_sent.set()
         _send_arxiv(handler, status=500 if handler.server.calls == 1 else 200)
 
     server = server_factory(behavior)
@@ -735,7 +818,7 @@ def test_arxiv_retries_share_one_operation_deadline(
         f"http://127.0.0.2:{server.server_port}/api/query",
     )
     client = _arxiv_deadline_client(
-        overall_timeout_seconds=0.12,
+        overall_timeout_seconds=0.35,
         timeout_seconds=1,
         max_retries=1,
         backoff_seconds=0,
@@ -745,8 +828,9 @@ def test_arxiv_retries_share_one_operation_deadline(
     with pytest.raises(requests.Timeout):
         client.get_metadata("1706.03762")
 
-    assert time.monotonic() - started < 0.4
+    assert time.monotonic() - started < 0.55
     assert server.calls == 2
+    assert not final_response_sent.is_set()
 
 
 def test_arxiv_read_timeout_remains_active_within_overall_budget(
@@ -773,6 +857,35 @@ def test_arxiv_read_timeout_remains_active_within_overall_budget(
         client.get_metadata("1706.03762")
 
     assert time.monotonic() - started < 0.3
+
+
+def test_arxiv_tls_handshake_uses_connection_timeout(
+    arxiv_controlled_transport, raw_server_factory, monkeypatch
+):
+    connection_started = threading.Event()
+
+    def stall_tls(_connection):
+        connection_started.set()
+        time.sleep(0.3)
+
+    server = raw_server_factory(stall_tls)
+    arxiv_controlled_transport()
+    monkeypatch.setattr(
+        arxiv_module,
+        "ARXIV_API_QUERY_URL",
+        f"https://127.0.0.2:{server.server_address[1]}/api/query",
+    )
+    client = _arxiv_deadline_client(
+        overall_timeout_seconds=0.4,
+        timeout_seconds=0.03,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(requests.Timeout):
+        client.get_metadata("1706.03762")
+
+    assert time.monotonic() - started < 0.2
+    assert connection_started.is_set()
 
 
 def test_arxiv_trickled_response_cannot_extend_operation_deadline(
