@@ -5,6 +5,9 @@ answers Atom XML (not JSON), so response parsing is handled here rather than by
 callers. Every operation has a monotonic overall deadline.
 """
 
+# Internal deadline methods are shared with the package fetch components.
+# pylint: disable=protected-access
+
 import logging
 import math
 import re
@@ -15,6 +18,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+from comourat.fetch import FetchPolicy, SafeHttpClient, _Deadline, _DeadlineExceeded
 from comourat.models import PaperIdentity, PaperRecord, normalize_arxiv_id
 from comourat.proxy import validate_proxy_url
 
@@ -115,11 +119,12 @@ def _normalize_reference(reference: str) -> str:
 class ArxivClient:
     """Client for the unauthenticated arXiv API and PDF endpoint.
 
-    `http_client` is injectable for tests. By default, a `requests.Session`
-    with the configured identifying User-Agent is used. `timeout_seconds`
-    limits connection and read operations for each HTTP request.
-    `overall_timeout_seconds` limits the complete public operation, including
-    retries, delays, and response parsing.
+    `http_client` is injectable for tests. By default, a protected
+    `SafeHttpClient` with the configured identifying User-Agent is used.
+    `timeout_seconds` limits connection and read operations for each HTTP
+    request. `overall_timeout_seconds` enforces one deadline for the complete
+    public operation, including DNS, transfers, redirects, retries, delays,
+    and response parsing.
     """
 
     def __init__(
@@ -142,45 +147,62 @@ class ArxivClient:
         self.backoff_seconds = backoff_seconds
         self.regular_delay_seconds = regular_delay_seconds
         self.proxy = validate_proxy_url(proxy) if proxy else None
-        self._session: requests.Session | None = None
+        self._http_client = http_client
+        self._safe_client: SafeHttpClient | None = None
         if http_client is None:
-            self._session = requests.Session()
-            self._session.headers.update({"User-Agent": self.user_agent})
-            if self.proxy:
-                self._session.proxies.update({"http": self.proxy, "https": self.proxy})
-        else:
-            self._http_client = http_client
+            session = requests.Session()
+            session.headers.update({"User-Agent": self.user_agent})
+            policy = FetchPolicy(
+                overall_timeout=self.overall_timeout_seconds,
+                connection_timeout=self.timeout_seconds,
+                read_timeout=self.timeout_seconds,
+            )
+            self._safe_client = SafeHttpClient(
+                session,
+                fetch_policy=policy,
+                proxy=self.proxy,
+            )
+        elif isinstance(http_client, SafeHttpClient):
+            self._safe_client = http_client
 
-    def _start_operation(self) -> float:
-        return time.monotonic() + self.overall_timeout_seconds
+    def _start_operation(self) -> _Deadline:
+        return _Deadline.start(
+            self.overall_timeout_seconds,
+            time.monotonic,
+            read_timeout=self.timeout_seconds,
+        )
 
-    def _remaining(self, deadline: float) -> float:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+    def _remaining(self, deadline: _Deadline) -> float:
+        try:
+            return deadline.remaining()
+        except _DeadlineExceeded as exc:
             raise requests.Timeout(
                 "arXiv operation exceeded "
                 f"its {self.overall_timeout_seconds:g}-second overall timeout"
-            )
-        return remaining
+            ) from exc
 
-    def _sleep(self, delay: float, deadline: float) -> None:
+    def _sleep(self, delay: float, deadline: _Deadline) -> None:
         if delay <= 0:
             return
         time.sleep(min(delay, self._remaining(deadline)))
         self._remaining(deadline)
 
-    def _get(
-        self, url: str, _deadline: float | None = None, **kwargs: Any
-    ) -> requests.Response:
+    def _get(self, url: str, _deadline: _Deadline, **kwargs: Any) -> requests.Response:
         """GET with bounded retry, backoff, and one overall operation deadline."""
-        deadline = self._start_operation() if _deadline is None else _deadline
+        deadline = _deadline
         attempt = 0
         while True:
             request_timeout = min(self.timeout_seconds, self._remaining(deadline))
             try:
-                if self._session is not None:
-                    response = self._session.get(url, timeout=request_timeout, **kwargs)
+                if self._safe_client is not None:
+                    response = self._safe_client._call(
+                        self._safe_client.session.get,
+                        url,
+                        _deadline=deadline,
+                        **kwargs,
+                    )
                 else:
+                    assert self._http_client is not None
                     response = self._http_client.get(
                         url, timeout=request_timeout, **kwargs
                     )
@@ -219,7 +241,7 @@ class ArxivClient:
             )
             self._sleep(delay, deadline)
 
-    def _parse_xml(self, text: str, deadline: float) -> ET.Element:
+    def _parse_xml(self, text: str, deadline: _Deadline) -> ET.Element:
         try:
             root = ET.fromstring(text)
         except ET.ParseError:
@@ -239,35 +261,42 @@ class ArxivClient:
         """
         arxiv_id = _normalize_reference(reference)
         deadline = self._start_operation()
-        response = self._get(
-            ARXIV_API_QUERY_URL,
-            params={"id_list": arxiv_id},
-            _deadline=deadline,
-        )
         try:
-            root = self._parse_xml(response.text, deadline)
-        except ET.ParseError as exc:
-            raise ArxivMetadataError("arXiv returned malformed Atom XML") from exc
+            response = self._get(
+                ARXIV_API_QUERY_URL,
+                params={"id_list": arxiv_id},
+                _deadline=deadline,
+            )
+            try:
+                root = self._parse_xml(response.text, deadline)
+            except ET.ParseError as exc:
+                raise ArxivMetadataError("arXiv returned malformed Atom XML") from exc
 
-        entry = root.find("a:entry", namespaces=ATOM_NS)
-        if entry is None:
+            entry = root.find("a:entry", namespaces=ATOM_NS)
+            if entry is None:
+                self._remaining(deadline)
+                return None
+            _raise_for_provider_error(entry)
+            title = " ".join(
+                (entry.findtext("a:title", namespaces=ATOM_NS) or "").split()
+            )
+            abstract = " ".join(
+                (entry.findtext("a:summary", namespaces=ATOM_NS) or "").split()
+            )
             self._remaining(deadline)
-            return None
-        _raise_for_provider_error(entry)
-        title = " ".join((entry.findtext("a:title", namespaces=ATOM_NS) or "").split())
-        abstract = " ".join(
-            (entry.findtext("a:summary", namespaces=ATOM_NS) or "").split()
-        )
-        self._remaining(deadline)
-        if not title or not abstract:
-            raise ArxivMetadataError("arXiv metadata must contain a title and abstract")
-        record = PaperRecord(
-            identity=PaperIdentity.from_values(arxiv_id=arxiv_id),
-            title=title,
-            abstract=abstract,
-        )
-        self._remaining(deadline)
-        return record
+            if not title or not abstract:
+                raise ArxivMetadataError(
+                    "arXiv metadata must contain a title and abstract"
+                )
+            record = PaperRecord(
+                identity=PaperIdentity.from_values(arxiv_id=arxiv_id),
+                title=title,
+                abstract=abstract,
+            )
+            self._remaining(deadline)
+            return record
+        finally:
+            deadline.close()
 
     def get_title_by_id(self, arxiv_id: str) -> str | None:
         """Return the title of an arXiv id, or None when the feed is empty.
@@ -277,20 +306,23 @@ class ArxivClient:
         entries raise `ArxivMetadataError` with the provider summary.
         """
         deadline = self._start_operation()
-        response = self._get(
-            ARXIV_API_QUERY_URL, params={"id_list": arxiv_id}, _deadline=deadline
-        )
-        root = self._parse_xml(response.text, deadline)
-        entry = root.find("a:entry", namespaces=ATOM_NS)
-        if entry is None:
+        try:
+            response = self._get(
+                ARXIV_API_QUERY_URL, params={"id_list": arxiv_id}, _deadline=deadline
+            )
+            root = self._parse_xml(response.text, deadline)
+            entry = root.find("a:entry", namespaces=ATOM_NS)
+            if entry is None:
+                self._remaining(deadline)
+                return None
+            _raise_for_provider_error(entry)
+            title = entry.findtext("a:title", namespaces=ATOM_NS)
             self._remaining(deadline)
-            return None
-        _raise_for_provider_error(entry)
-        title = entry.findtext("a:title", namespaces=ATOM_NS)
-        self._remaining(deadline)
-        if title is None:
-            return None
-        return " ".join(title.split())
+            if title is None:
+                return None
+            return " ".join(title.split())
+        finally:
+            deadline.close()
 
     def search_by_title(self, title: str) -> tuple[str, str] | None:
         """Find an arXiv preprint by title; returns (arxiv_id, arxiv_title).
@@ -303,17 +335,20 @@ class ArxivClient:
         matching can return a different paper.
         """
         deadline = self._start_operation()
-        response = self._get(
-            ARXIV_API_QUERY_URL,
-            params={"search_query": f'ti:"{title}"', "max_results": 1},
-            _deadline=deadline,
-        )
-        root = self._parse_xml(response.text, deadline)
-        entry_id = root.findtext("a:entry/a:id", namespaces=ATOM_NS)
-        entry_title = root.findtext("a:entry/a:title", namespaces=ATOM_NS)
-        self._remaining(deadline)
-        if entry_id is None or entry_title is None:
-            return None
-        bare_id = entry_id.rsplit("/", 1)[-1]
-        arxiv_id = bare_id.split("v")[0] if "v" in bare_id[4:] else bare_id
-        return arxiv_id, " ".join(entry_title.split())
+        try:
+            response = self._get(
+                ARXIV_API_QUERY_URL,
+                params={"search_query": f'ti:"{title}"', "max_results": 1},
+                _deadline=deadline,
+            )
+            root = self._parse_xml(response.text, deadline)
+            entry_id = root.findtext("a:entry/a:id", namespaces=ATOM_NS)
+            entry_title = root.findtext("a:entry/a:title", namespaces=ATOM_NS)
+            self._remaining(deadline)
+            if entry_id is None or entry_title is None:
+                return None
+            bare_id = entry_id.rsplit("/", 1)[-1]
+            arxiv_id = bare_id.split("v")[0] if "v" in bare_id[4:] else bare_id
+            return arxiv_id, " ".join(entry_title.split())
+        finally:
+            deadline.close()

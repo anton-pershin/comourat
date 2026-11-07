@@ -41,7 +41,7 @@ class FetchPolicyError(FetchError):
     """A URL or destination violates the configured fetch policy."""
 
 
-class FetchResolutionError(FetchError):
+class FetchResolutionError(requests.ConnectionError, FetchError):
     """A hostname cannot be resolved into a usable answer set."""
 
 
@@ -56,10 +56,17 @@ class _DeadlineExceeded(TimeoutError):
 class _Deadline:
     """Monotonic deadline with a watchdog that aborts registered sockets."""
 
-    def __init__(self, timeout: float, clock: Clock, started: float) -> None:
+    def __init__(
+        self,
+        timeout: float,
+        clock: Clock,
+        started: float,
+        read_timeout: float | None = None,
+    ) -> None:
         self.timeout = timeout
         self.clock = clock
         self.started = started
+        self.read_timeout = read_timeout
         self._lock = threading.Lock()
         self._sockets: set[Any] = set()
         self._active = True
@@ -69,8 +76,18 @@ class _Deadline:
         self._timer.start()
 
     @classmethod
-    def start(cls, timeout: float, clock: Clock) -> _Deadline:
-        return cls(timeout=timeout, clock=clock, started=clock())
+    def start(
+        cls,
+        timeout: float,
+        clock: Clock,
+        read_timeout: float | None = None,
+    ) -> _Deadline:
+        return cls(
+            timeout=timeout,
+            clock=clock,
+            started=clock(),
+            read_timeout=read_timeout,
+        )
 
     def remaining(self) -> float:
         remaining = self.timeout - (self.clock() - self.started)
@@ -194,8 +211,9 @@ class FetchPolicy:
     addresses and CIDR networks. The built-in target policy permits global
     unicast addresses only. An explicitly configured proxy may use a loopback
     or private address, but the same caller deny rules apply to it.
-    ``connection_timeout`` optionally caps each connection attempt. It never
-    exceeds the remaining overall time. The default ``None`` preserves the
+    ``connection_timeout`` optionally caps each connection attempt.
+    ``read_timeout`` optionally caps each response read. Neither limit exceeds
+    the remaining overall time. Their default ``None`` preserves the
     overall-timeout-only behavior.
     """
 
@@ -206,6 +224,7 @@ class FetchPolicy:
         deny_addresses: Iterable[str] = (),
         overall_timeout: float = 30.0,
         connection_timeout: float | None = None,
+        read_timeout: float | None = None,
         max_redirects: int = 30,
         max_retries: int = 0,
     ) -> None:
@@ -222,6 +241,13 @@ class FetchPolicy:
             or connection_timeout <= 0
         ):
             raise ValueError("connection timeout must be a positive finite number")
+        if read_timeout is not None and (
+            isinstance(read_timeout, bool)
+            or not isinstance(read_timeout, (int, float))
+            or not math.isfinite(read_timeout)
+            or read_timeout <= 0
+        ):
+            raise ValueError("read timeout must be a positive finite number")
         if (
             isinstance(max_redirects, bool)
             or not isinstance(max_redirects, int)
@@ -248,6 +274,7 @@ class FetchPolicy:
         self.connection_timeout = (
             None if connection_timeout is None else float(connection_timeout)
         )
+        self.read_timeout = None if read_timeout is None else float(read_timeout)
         self.max_redirects = max_redirects
         self.max_retries = max_retries
 
@@ -532,19 +559,39 @@ class SafeHttpClient:
         values = set(validated.values())
         return values.pop() if len(values) == 1 else None
 
-    def _call(self, method, url: str, **kwargs):
+    def _call(
+        self,
+        method,
+        url: str,
+        *,
+        _deadline: _Deadline | None = None,
+        **kwargs,
+    ):
         self.policy._parse_target(url)
         self._install_get_adapter()
         if "proxies" in kwargs:
             raise ProxyConfigurationError(
                 "per-request proxies are not supported; configure the client"
             )
-        deadline = _Deadline.start(self.policy.overall_timeout, self.clock)
+        owns_deadline = _deadline is None
+        deadline = (
+            _Deadline.start(
+                self.policy.overall_timeout,
+                self.clock,
+                read_timeout=self.policy.read_timeout,
+            )
+            if owns_deadline
+            else _deadline
+        )
+        assert deadline is not None
         token = _current_deadline.set(deadline)
         kwargs["timeout"] = self.policy.overall_timeout
         kwargs.setdefault("allow_redirects", True)
         try:
-            return method(url, **kwargs)
+            deadline.remaining()
+            response = method(url, **kwargs)
+            deadline.remaining()
+            return response
         except FetchPolicyError:
             raise
         except Exception as exc:
@@ -554,7 +601,8 @@ class SafeHttpClient:
             raise
         finally:
             _current_deadline.reset(token)
-            deadline.close()
+            if owns_deadline:
+                deadline.close()
 
     def get(self, url: str, **kwargs):
         return self._call(self.session.get, url, **kwargs)
