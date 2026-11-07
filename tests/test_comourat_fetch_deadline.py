@@ -652,6 +652,20 @@ def _arxiv_deadline_client(**kwargs):
     return ArxivClient(**settings)
 
 
+def _observe_resolver_results(monkeypatch):
+    result_put = threading.Event()
+    original_queue = queue.Queue
+
+    class ObservedQueue(original_queue):
+        def put(self, *args, **kwargs):
+            result = super().put(*args, **kwargs)
+            result_put.set()
+            return result
+
+    monkeypatch.setattr("comourat.fetch.queue.Queue", ObservedQueue)
+    return result_put
+
+
 def test_arxiv_default_transport_uses_safe_http_client():
     client = ArxivClient(user_agent="comourat-test/0.1")
 
@@ -677,6 +691,7 @@ def test_injected_safe_client_uses_arxiv_operation_deadline(
         "ARXIV_API_QUERY_URL",
         f"http://slow-dns.test:{server.server_port}/api/query",
     )
+    resolver_result_put = _observe_resolver_results(monkeypatch)
     client = _arxiv_deadline_client(
         http_client=safe_client,
         overall_timeout_seconds=0.05,
@@ -689,6 +704,7 @@ def test_injected_safe_client_uses_arxiv_operation_deadline(
         assert time.monotonic() - started < 0.25
     finally:
         release_resolver.set()
+    assert resolver_result_put.wait(1)
     assert server.calls == 0
 
 
@@ -710,16 +726,7 @@ def test_arxiv_blocking_dns_uses_operation_deadline(
         "ARXIV_API_QUERY_URL",
         f"http://slow-dns.test:{server.server_port}/api/query",
     )
-    resolver_result_put = threading.Event()
-    original_queue = queue.Queue
-
-    class ObservedQueue(original_queue):
-        def put(self, *args, **kwargs):
-            result = super().put(*args, **kwargs)
-            resolver_result_put.set()
-            return result
-
-    monkeypatch.setattr("comourat.fetch.queue.Queue", ObservedQueue)
+    resolver_result_put = _observe_resolver_results(monkeypatch)
     client = _arxiv_deadline_client(overall_timeout_seconds=0.05)
 
     started = time.monotonic()
