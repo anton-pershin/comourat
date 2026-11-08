@@ -70,7 +70,7 @@ The client extracts the identifier locally and requests only the arXiv Atom API.
 
 Both `get_metadata` and `get_title_by_id` reject an arXiv provider error entry identified by an `/api/errors` entry ID or link. They raise `ArxivMetadataError` with the provider summary as diagnostic context instead of returning the error as paper data. Detection does not use the entry title, so an ordinary paper titled `Error` remains valid. After the configured retries, provider HTTP and transport failures remain explicit as `requests.HTTPError`, `requests.ConnectionError`, or `requests.Timeout`.
 
-Both `timeout_seconds` and `overall_timeout_seconds` default to 120 seconds. `timeout_seconds` is the connection and read timeout for each HTTP request. `overall_timeout_seconds` limits the complete operation, including HTTP requests, Atom response parsing, retries, backoff, and politeness delays. Each request and delay receives only the remaining time. Overall expiry raises `requests.Timeout`. These limits also apply to `get_title_by_id` and `search_by_title`.
+Both `timeout_seconds` and `overall_timeout_seconds` default to 120 seconds. `timeout_seconds` caps each connection attempt and each response read without exceeding the remaining overall time. `overall_timeout_seconds` enforces one monotonic deadline for the complete operation. DNS resolution, connection setup, redirects, response headers and body transfer, retries, backoff, politeness delays, and Atom response parsing all consume the same budget. A slow or trickled response cannot restart or extend this deadline. Overall expiry raises `requests.Timeout`. These limits also apply to `get_title_by_id` and `search_by_title`.
 
 ## Package layout
 
@@ -258,7 +258,7 @@ The default connection timeout is 10 seconds for each connection attempt. The de
 
 ## Protected web fetching
 
-`PageFetcher` and the web tools used by `create_enrichment_agent`, `EnrichmentAgent`, and `PaperDiscovererCore` use `SafeHttpClient`. The default `FetchPolicy` permits only HTTP and HTTPS targets with global unicast addresses. It rejects loopback, private, link-local, unspecified, multicast, reserved, carrier-grade NAT, and other non-global IPv4 and IPv6 addresses. IPv4-mapped IPv6 addresses are checked in both address families.
+`ArxivClient`, `PageFetcher`, and the web tools used by `create_enrichment_agent`, `EnrichmentAgent`, and `PaperDiscovererCore` use `SafeHttpClient`. The default `FetchPolicy` permits only HTTP and HTTPS targets with global unicast addresses. It rejects loopback, private, link-local, unspecified, multicast, reserved, carrier-grade NAT, and other non-global IPv4 and IPv6 addresses. IPv4-mapped IPv6 addresses are checked in both address families.
 
 Pass a policy to add exact-host, IP-address, or CIDR deny rules. Host rules ignore case, IDNA differences, and a trailing dot. For example:
 
@@ -300,7 +300,7 @@ SOCKS4 supports only IPv4 targets. An IPv6 target through SOCKS4 is rejected bef
 
 Each top-level request has one monotonic overall deadline. The default is 30 seconds. DNS resolution, direct and proxy connections, proxy negotiation, TLS handshakes, request and response transfer, response-body reading, redirects, retries, and retry delays all consume the same budget. Each stage receives only the remaining time. A slow peer cannot restart the timeout by sending data slowly.
 
-The default redirect limit is 30 and automatic retries are disabled (`max_retries=0`). `FetchPolicy(connection_timeout=...)` optionally caps each connection attempt without exceeding the remaining overall time. Its default `None` preserves the overall-timeout-only behavior. The direct `PageFetcher` timeout settings and aliases are described in the article-extraction section.
+The default redirect limit is 30 and automatic retries are disabled (`max_retries=0`). `FetchPolicy(connection_timeout=...)` optionally caps each connection attempt without exceeding the remaining overall time. `FetchPolicy(read_timeout=...)` applies the same type of cap to each response read. Their default `None` preserves the overall-timeout-only behavior. Neither limit can extend the overall deadline. The direct `PageFetcher` timeout settings and aliases are described in the article-extraction section.
 
 `SafeHttpClient` raises `FetchPolicyError` for local policy denials, `FetchResolutionError` for resolution failures, and `FetchDeadlineExceeded` when the overall deadline expires. Proxy-enforced denials can appear as proxy or HTTP errors. No failure selects an unprotected direct or proxy fallback. Logs and client exceptions remove URL userinfo, paths, queries, and proxy credentials. `PageFetcher` translates these failures into its public article categories. `EnrichmentAgent` converts protected search and fetch exceptions into the public failure results described above. Direct `attach_web_tools` use keeps its string-returning default for other agents, including paper discovery.
 

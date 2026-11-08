@@ -56,8 +56,16 @@ def _contains_deadline_error(error: BaseException | None) -> bool:
     return False
 
 
+def _read_timeout_remaining(deadline: _Deadline) -> float:
+    remaining = deadline.remaining()
+    read_timeout = getattr(deadline, "read_timeout", None)
+    if read_timeout is None:
+        return remaining
+    return min(read_timeout, remaining)
+
+
 class _DeadlineTimeout(Timeout):
-    """Timeout view bounded by connection and remaining overall time."""
+    """Timeout view bounded by connection, read, and overall time."""
 
     def __init__(
         self, deadline: _Deadline, connection_timeout: float | None = None
@@ -82,7 +90,7 @@ class _DeadlineTimeout(Timeout):
     @property
     def read_timeout(self):
         try:
-            return self.deadline.remaining()
+            return _read_timeout_remaining(self.deadline)
         except _DeadlineExceeded:
             return 0
 
@@ -90,15 +98,21 @@ class _DeadlineTimeout(Timeout):
 class _DeadlineSSLContext:
     """Delegate SSLContext behavior and register sockets before handshakes."""
 
-    def __init__(self, context, deadline: _Deadline) -> None:
+    def __init__(
+        self,
+        context,
+        deadline: _Deadline,
+        connection_timeout: float | None = None,
+    ) -> None:
         object.__setattr__(self, "_context", context)
         object.__setattr__(self, "_deadline", deadline)
+        object.__setattr__(self, "_connection_timeout", connection_timeout)
 
     def __getattr__(self, name):
         return getattr(self._context, name)
 
     def __setattr__(self, name, value) -> None:
-        if name in {"_context", "_deadline"}:
+        if name in {"_context", "_deadline", "_connection_timeout"}:
             object.__setattr__(self, name, value)
         else:
             setattr(self._context, name, value)
@@ -109,11 +123,23 @@ class _DeadlineSSLContext:
         tls_socket = self._context.wrap_socket(sock, *args, **kwargs)
         self._deadline.register(tls_socket)
         if do_handshake:
+            if self._connection_timeout is not None:
+                tls_socket.settimeout(
+                    _connection_timeout_remaining(
+                        self._deadline, self._connection_timeout
+                    )
+                )
             tls_socket.do_handshake()
+            if self._connection_timeout is not None:
+                tls_socket.settimeout(self._deadline.remaining())
         return tls_socket
 
 
-def _tls_context(pool_kwargs, deadline: _Deadline):
+def _tls_context(
+    pool_kwargs,
+    deadline: _Deadline,
+    connection_timeout: float | None = None,
+):
     # Requests reuses a process-global preloaded SSLContext. Never wrap or
     # mutate it: each target and proxy needs independent trust state.
     context = create_urllib3_context(
@@ -122,7 +148,7 @@ def _tls_context(pool_kwargs, deadline: _Deadline):
         ssl_maximum_version=pool_kwargs.get("ssl_maximum_version"),
         cert_reqs=resolve_cert_reqs(pool_kwargs.get("cert_reqs")),
     )
-    return _DeadlineSSLContext(context, deadline)
+    return _DeadlineSSLContext(context, deadline, connection_timeout)
 
 
 class _DeadlineRetry(Retry):
@@ -184,7 +210,7 @@ class _DeadlineReader:
         self._deadline = deadline
 
     def _refresh(self) -> None:
-        self._socket.settimeout(self._deadline.remaining())
+        self._socket.settimeout(_read_timeout_remaining(self._deadline))
 
     def read(self, *args, **kwargs):
         self._refresh()
@@ -270,6 +296,9 @@ class _DeadlineSocket(socket.socket):
     def _refresh(self) -> None:
         super().settimeout(self._comourat_deadline.remaining())
 
+    def _refresh_read(self) -> None:
+        super().settimeout(_read_timeout_remaining(self._comourat_deadline))
+
     def _refresh_connection(self) -> None:
         super().settimeout(
             _connection_timeout_remaining(
@@ -292,11 +321,11 @@ class _DeadlineSocket(socket.socket):
         return super().sendall(*args, **kwargs)
 
     def recv(self, *args, **kwargs):
-        self._refresh()
+        self._refresh_read()
         return super().recv(*args, **kwargs)
 
     def recv_into(self, *args, **kwargs):
-        self._refresh()
+        self._refresh_read()
         return super().recv_into(*args, **kwargs)
 
 
@@ -382,6 +411,9 @@ class _PinnedSocksSocket(socks.socksocket):
     def _refresh(self) -> None:
         super().settimeout(self._comourat_deadline.remaining())
 
+    def _refresh_read(self) -> None:
+        super().settimeout(_read_timeout_remaining(self._comourat_deadline))
+
     def _refresh_connection(self) -> None:
         super().settimeout(
             _connection_timeout_remaining(
@@ -407,11 +439,11 @@ class _PinnedSocksSocket(socks.socksocket):
         return super().sendall(*args, **kwargs)
 
     def recv(self, *args, **kwargs):
-        self._refresh()
+        self._refresh_read()
         return super().recv(*args, **kwargs)
 
     def recv_into(self, *args, **kwargs):
-        self._refresh()
+        self._refresh_read()
         return super().recv_into(*args, **kwargs)
 
     def makefile(self, mode="r", buffering=None, **kwargs):
@@ -636,7 +668,9 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
             for key in SSL_KEYWORDS:
                 pool_kwargs.pop(key, None)
         else:
-            pool_kwargs["ssl_context"] = _tls_context(pool_kwargs, state.deadline)
+            pool_kwargs["ssl_context"] = _tls_context(
+                pool_kwargs, state.deadline, self.policy.connection_timeout
+            )
         pool_class = (
             _PinnedHTTPSConnectionPool
             if state.target.scheme == "https"
@@ -666,8 +700,12 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
                 pool_kwargs.pop(key, None)
         else:
             if proxy.target.scheme == "https":
-                proxy_ssl_context = _tls_context(pool_kwargs, state.deadline)
-            pool_kwargs["ssl_context"] = _tls_context(pool_kwargs, state.deadline)
+                proxy_ssl_context = _tls_context(
+                    pool_kwargs, state.deadline, self.policy.connection_timeout
+                )
+            pool_kwargs["ssl_context"] = _tls_context(
+                pool_kwargs, state.deadline, self.policy.connection_timeout
+            )
         pool_class = (
             _PinnedHTTPSConnectionPool
             if pool_scheme == "https"
@@ -696,7 +734,9 @@ class _SafeHTTPAdapter(requests.adapters.HTTPAdapter):
             for key in SSL_KEYWORDS:
                 pool_kwargs.pop(key, None)
         else:
-            pool_kwargs["ssl_context"] = _tls_context(pool_kwargs, state.deadline)
+            pool_kwargs["ssl_context"] = _tls_context(
+                pool_kwargs, state.deadline, self.policy.connection_timeout
+            )
         username, password = get_auth_from_url(proxy.url)
         socks_options = {
             "socks_version": (
