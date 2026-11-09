@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import math
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
+import praw
 import requests
 
 from comourat.fetch import FetchPolicy, SafeHttpClient
@@ -153,4 +156,126 @@ class RedditSubmissionClient:
         submission = child.get("data")
         if not isinstance(submission, dict):
             raise RuntimeError("Reddit submission has no valid data container")
+        return submission
+
+
+class PrawRedditSubmissionClient:
+    """Retrieve one submission through a caller-provided or created PRAW client."""
+
+    def __init__(
+        self,
+        praw_client: praw.Reddit | None = None,
+        *,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        user_agent: str | None = None,
+        operation_timeout: float = DEFAULT_OPERATION_TIMEOUT,
+    ) -> None:
+        self.operation_timeout = self._validate_operation_timeout(operation_timeout)
+        oauth_values = (client_id, client_secret, user_agent)
+        if praw_client is not None:
+            if any(value is not None for value in oauth_values):
+                raise ValueError(
+                    "provide either a PRAW client or OAuth configuration, not both"
+                )
+        else:
+            if all(value is None for value in oauth_values):
+                raise ValueError(
+                    "provide a PRAW client or explicit OAuth configuration"
+                )
+            client_id = self._validate_oauth_value(client_id, "client ID")
+            client_secret = self._validate_oauth_value(client_secret, "client secret")
+            user_agent = self._validate_oauth_value(user_agent, "user agent")
+            praw_client = praw.Reddit(
+                site_name="DEFAULT",
+                client_id=client_id,
+                client_secret=client_secret,
+                user_agent=user_agent,
+                check_for_updates=False,
+                requestor_kwargs={"timeout": self.operation_timeout},
+            )
+        self.praw_client = praw_client
+
+    @staticmethod
+    def _validate_operation_timeout(operation_timeout: float) -> float:
+        if (
+            isinstance(operation_timeout, bool)
+            or not isinstance(operation_timeout, (int, float))
+            or not math.isfinite(operation_timeout)
+            or operation_timeout <= 0
+        ):
+            raise ValueError("operation timeout must be a positive finite number")
+        return float(operation_timeout)
+
+    @staticmethod
+    def _validate_oauth_value(value: str | None, name: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+        return value.strip()
+
+    @staticmethod
+    def _contains_timeout(error: BaseException) -> bool:
+        pending = [error]
+        seen = set()
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            if isinstance(current, (requests.Timeout, TimeoutError)):
+                return True
+            original = getattr(current, "original_exception", None)
+            if isinstance(original, BaseException):
+                pending.append(original)
+            if current.__cause__ is not None:
+                pending.append(current.__cause__)
+            if current.__context__ is not None:
+                pending.append(current.__context__)
+        return False
+
+    @staticmethod
+    def _http_status(error: BaseException) -> int | None:
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None)
+        return status if isinstance(status, int) else None
+
+    def _deadline_expired(self, started: float) -> bool:
+        return time.monotonic() - started >= self.operation_timeout
+
+    def fetch_submission(self, submission_id: str) -> dict[str, Any]:
+        """Return one submission through PRAW without loading its comments."""
+        if not isinstance(submission_id, str) or not submission_id:
+            raise ValueError("submission ID must be a non-empty string")
+        started = time.monotonic()
+        try:
+            payload = self.praw_client.request(
+                method="GET",
+                path="/api/info/",
+                params={"id": f"t3_{submission_id}"},
+            )
+        except Exception as exc:
+            if self._deadline_expired(started) or self._contains_timeout(exc):
+                raise TimeoutError(
+                    "Reddit authenticated submission request timed out"
+                ) from exc
+            if self._http_status(exc) in {404, 410}:
+                raise LookupError("Reddit submission is unavailable") from exc
+            raise RuntimeError(
+                "Reddit authenticated submission request failed"
+            ) from exc
+
+        if self._deadline_expired(started):
+            raise TimeoutError("Reddit authenticated submission request timed out")
+        try:
+            # Both public transports share this module-internal response contract.
+            # pylint: disable-next=protected-access
+            submission = RedditSubmissionClient._extract_submission(payload)
+        except (LookupError, RuntimeError) as exc:
+            if self._deadline_expired(started):
+                raise TimeoutError(
+                    "Reddit authenticated submission request timed out"
+                ) from exc
+            raise
+        if self._deadline_expired(started):
+            raise TimeoutError("Reddit authenticated submission request timed out")
         return submission

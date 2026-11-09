@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 import praw
 
-from comourat.clients.reddit import RedditSubmissionClient
+from comourat.clients.reddit import PrawRedditSubmissionClient, RedditSubmissionClient
 from comourat.models import RedditPostCollection, RedditPostInfo
 
 _SUBMISSION_ID = re.compile(r"[0-9A-Za-z]+")
@@ -122,7 +122,9 @@ class RedditPostCollectorCore:
 class RedditSubmissionCollector:
     """Collect one specified Reddit submission through a submission-only client."""
 
-    def __init__(self, reddit_client: RedditSubmissionClient) -> None:
+    def __init__(
+        self, reddit_client: RedditSubmissionClient | PrawRedditSubmissionClient
+    ) -> None:
         self.reddit_client = reddit_client
 
     def collect(self, reference: str) -> RedditPostInfo:

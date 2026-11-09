@@ -102,22 +102,64 @@ print(post.title, post.url, post.text)
 
 `collect` accepts a bare ASCII base36 submission ID, a Reddit comment permalink, a Reddit gallery URL, or a `redd.it` short URL. HTTP and HTTPS input URLs are accepted because Comourat extracts only the ID; it does not fetch the input URL. The URL must contain the submission ID directly. Mobile share URLs and other URLs that require resolution are not supported.
 
-The client requests only Reddit's `/api/info/` submission listing. It does not use PRAW's lazy submission loader, request a subreddit feed, or request comments. A link post with empty `selftext` is valid.
+The JSON client requests only Reddit's `/api/info/` submission listing. It does not use PRAW's lazy submission loader, request a subreddit feed, or request comments. A link post with empty `selftext` is valid.
 
 The returned `RedditPostInfo` contains the subreddit, bare submission ID, title, author, UTC creation time, text, and score. Its `url` is the absolute `https://www.reddit.com` discussion permalink from the source response, even when the submission links to an external article.
+
+### Authenticated Reddit access
+
+Use `PrawRedditSubmissionClient` when Reddit rejects the public JSON endpoint. Pass an authenticated PRAW client that the caller has already configured:
+
+```python
+import praw
+
+from comourat.clients.reddit import PrawRedditSubmissionClient
+from comourat.collectors.reddit import RedditSubmissionCollector
+
+reddit = praw.Reddit(
+    client_id="caller-provided-client-id",
+    client_secret="caller-provided-client-secret",
+    user_agent="Your Project (contact@example.org)",
+    check_for_updates=False,
+)
+client = PrawRedditSubmissionClient(
+    praw_client=reddit,
+    operation_timeout=30,
+)
+collector = RedditSubmissionCollector(client)
+post = collector.collect("abc123")
+```
+
+Alternatively, pass explicit OAuth configuration and let Comourat create a read-only PRAW client:
+
+```python
+client = PrawRedditSubmissionClient(
+    client_id="caller-provided-client-id",
+    client_secret="caller-provided-client-secret",
+    user_agent="Your Project (contact@example.org)",
+    operation_timeout=30,
+)
+collector = RedditSubmissionCollector(client)
+```
+
+Provide exactly one configuration form: `praw_client` or all three of `client_id`, `client_secret`, and `user_agent`. Comourat does not implement environment-variable or file credential lookup. The caller should obtain secrets from its secret manager or another explicit configuration source, pass them directly to the constructor, and never hard-code, log, or commit them. The dummy values above are examples only.
+
+The authenticated client calls PRAW's generic request interface for `/api/info/` with one submission fullname. It does not use `praw.Reddit.submission`, whose lazy loader also retrieves comments. It uses the same listing validation and collector mapping as the JSON client, so canonical permalinks, model fields, and unavailable-submission outcomes are unchanged.
 
 The default API base URL is `https://www.reddit.com`. Pass `api_url` to use another caller-selected Reddit API endpoint. Pass a configured Requests session as `http_session` when source authentication headers or other explicit session settings are needed. Use a separate session for each client. Environment proxy and timeout settings are not used.
 
 Failures have these public outcomes:
 
-- `ValueError`: invalid reference, user agent, API URL, or timeout configuration.
+- `ValueError`: invalid reference, authentication configuration, user agent, API URL, or timeout configuration.
 - `LookupError`: unavailable, deleted, removed, empty, or mismatched submission.
 - `RuntimeError`: other provider, HTTP, JSON, response-format, or source-data failures.
 - `TimeoutError`: connection or overall operation timeout expiry.
 
-Translated exceptions preserve the original exception as `__cause__`. Failures never produce an empty or partial successful result.
+Translated exceptions preserve the original exception as `__cause__`. Authenticated request failures use fixed public messages and do not copy provider exception text, credentials, access tokens, or response bodies into those messages. Failures never produce an empty or partial successful result.
 
-The connection timeout defaults to 10 seconds and applies to each connection attempt. The overall operation timeout defaults to 30 seconds and includes request preparation and authentication hooks, DNS resolution, connections, TLS handshakes, request and response transfer, redirects, and response-body reading. Each stage receives only the remaining overall time. A redirect, new connection, or response read does not restart it. Both values must be positive finite numbers.
+For `RedditSubmissionClient`, the connection timeout defaults to 10 seconds and applies to each connection attempt. The overall operation timeout defaults to 30 seconds and includes request preparation and authentication hooks, DNS resolution, connections, TLS handshakes, request and response transfer, redirects, and response-body reading. Each stage receives only the remaining overall time. A redirect, new connection, or response read does not restart it. Both values must be positive finite numbers.
+
+For `PrawRedditSubmissionClient`, `operation_timeout` defaults to 30 seconds and must be positive and finite. One monotonic deadline covers the complete PRAW call, including token acquisition or refresh and the submission request. A result or failure that completes after this deadline raises `TimeoutError`. A Comourat-created PRAW client receives this value as its request timeout. An injected PRAW client retains its own transport and request-timeout configuration, so the caller should configure a finite PRAW request timeout appropriate for the operation.
 
 ## Public enrichment
 
