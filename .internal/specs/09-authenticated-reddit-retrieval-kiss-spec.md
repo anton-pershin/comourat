@@ -86,4 +86,4 @@ flowchart LR
 
 The authenticated client checks one monotonic deadline around the complete PRAW call. A Comourat-created PRAW client receives the configured request timeout. An injected PRAW client keeps its own transport settings. Exception translation examines PRAW response status codes and wrapped transport errors without copying their text into public messages.
 
-The change is limited to the Reddit client module, focused deterministic tests, and README documentation. The collector, feed implementation, data models, and public JSON transport do not require modification.
+The change is limited to the Reddit client module, a collector type annotation that accepts either single-post client, focused deterministic tests, and README documentation. The collector's call interface, feed implementation, data models, and public JSON transport do not require modification.
