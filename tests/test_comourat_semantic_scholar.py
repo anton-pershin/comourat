@@ -451,6 +451,28 @@ def test_legacy_bulk_modes_keep_request_and_result_contracts(mode, sort):
     )
 
 
+def test_legacy_bulk_mode_retains_aligned_author_ids():
+    paper = _legacy_paper()
+    paper["authors"] = [
+        {"authorId": "author-1", "name": "First Author"},
+        {"name": "Second Author"},
+        {"authorId": None, "name": "Third Author"},
+        {"authorId": "author-4", "name": "Fourth Author"},
+    ]
+    http = MagicMock()
+    http.get.return_value = _response({"data": [paper], "token": None})
+
+    result = _legacy_collector(http).collect()
+
+    assert result.papers[0].authors == [
+        "First Author",
+        "Second Author",
+        "Third Author",
+        "Fourth Author",
+    ]
+    assert result.papers[0].author_ids == ["author-1", None, None, "author-4"]
+
+
 def test_legacy_bulk_mode_follows_continuation_tokens():
     http = MagicMock()
     http.get.side_effect = [

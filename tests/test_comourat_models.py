@@ -136,7 +136,19 @@ class TestInfoAndEnrichmentModels:
         info = PaperInfo(
             title="T", link="https://arxiv.org/abs/2401.00001", abstract="A"
         )
+        assert info.author_ids is None
         assert PaperInfo.model_validate_json(info.model_dump_json()) == info
         enrichment = EnrichmentSuccess(additional_context=["c1"])
         adapter = TypeAdapter(EnrichmentResult)
         assert adapter.validate_json(enrichment.model_dump_json()) == enrichment
+
+    def test_author_record_roundtrip(self):
+        from comourat.models import AuthorRecord
+
+        author = AuthorRecord(
+            author_id="author-1",
+            name="Author",
+            affiliations=["University"],
+        )
+
+        assert AuthorRecord.model_validate_json(author.model_dump_json()) == author
