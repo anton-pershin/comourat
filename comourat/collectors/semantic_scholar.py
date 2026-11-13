@@ -407,13 +407,15 @@ class SemanticScholarPaperCollectorCore:
             doi=external_ids.get("DOI"),
         )
         url = ss_paper_data.get("url")
+        retained_authors = [
+            author
+            for author in ss_paper_data.get("authors") or []
+            if author.get("name")
+        ]
         return PaperCandidate(
             title=title,
-            authors=[
-                author["name"]
-                for author in ss_paper_data.get("authors") or []
-                if author.get("name")
-            ],
+            authors=[author["name"] for author in retained_authors],
+            author_ids=[author.get("authorId") for author in retained_authors],
             description=ss_paper_data.get("abstract") or "",
             urls_seen=[url] if url else [],
             arxiv_id=identity.arxiv_id,

@@ -163,6 +163,10 @@ class PaperCandidate(BaseModel):
 
     title: str = Field(description="Title of the paper as discovered")
     authors: list[str] = Field(description="Authors of the paper, as found")
+    author_ids: list[str | None] | None = Field(
+        default=None,
+        description="Source author IDs aligned by index with authors, when supplied",
+    )
     description: str = Field(default="", description="Short description of the paper")
     urls_seen: list[str] = Field(
         default_factory=list, description="URLs encountered while discovering the paper"
