@@ -289,21 +289,68 @@ def test_per_query_cap_stops_within_and_across_pages():
     assert [query.cap_reached for query in result.query_results] == [True, True]
 
 
+def test_cap_counts_only_accepted_candidates_per_query():
+    http = MagicMock()
+    http.get.side_effect = [
+        _response(
+            {
+                "data": [
+                    _paper("q1-outside", publication_date="2024-01-01"),
+                    _paper("q1-first"),
+                    _paper("q1-malformed", publication_date="invalid"),
+                    _paper("q1-second"),
+                ],
+                "token": "q1-unused",
+            }
+        ),
+        _response(
+            {
+                "data": [
+                    _paper("q2-first"),
+                    _paper("q2-outside", publication_date="2024-01-04"),
+                ],
+                "token": None,
+            }
+        ),
+    ]
+
+    result = _collector(
+        http,
+        queries=["first", "second"],
+        max_results_per_query=2,
+    ).collect()
+
+    assert [paper.semantic_scholar_id for paper in result.papers] == [
+        "q1-first",
+        "q1-second",
+        "q2-first",
+    ]
+    assert http.get.call_count == 2
+    assert [query.candidate_count for query in result.query_results] == [2, 1]
+    assert [query.cap_reached for query in result.query_results] == [True, False]
+
+
 def test_retry_after_recovers_and_status_exhaustion_raises(monkeypatch):
     from comourat.collectors import semantic_scholar
 
     sleeps = []
     monkeypatch.setattr(semantic_scholar.time, "sleep", sleeps.append)
+    monkeypatch.setattr(semantic_scholar.random, "uniform", lambda low, high: high)
     http = MagicMock()
     http.get.side_effect = [
         _response({"message": "limited"}, 429, {"Retry-After": "3"}),
         _response({"data": [_paper()], "token": None}),
     ]
 
-    result = _collector(http, max_retries=1).collect()
+    result = _collector(
+        http,
+        max_retries=1,
+        jitter_seconds=0.25,
+        regular_delay_seconds=0.5,
+    ).collect()
 
     assert len(result.papers) == 1
-    assert sleeps == [3.0]
+    assert sleeps == [3.25, 0.5]
 
     http.reset_mock()
     http.get.side_effect = [
@@ -337,6 +384,24 @@ def test_backoff_and_non_retryable_status(monkeypatch):
     with pytest.raises(httpx.HTTPStatusError):
         _collector(http).collect()
     assert http.get.call_count == 1
+
+
+@pytest.mark.parametrize("retry_after", ["-1", "nan", "inf", "not-a-date"])
+def test_invalid_retry_after_uses_exponential_backoff(monkeypatch, retry_after):
+    from comourat.collectors import semantic_scholar
+
+    sleeps = []
+    monkeypatch.setattr(semantic_scholar.time, "sleep", sleeps.append)
+    http = MagicMock()
+    http.get.side_effect = [
+        _response({"message": "down"}, 500, {"Retry-After": retry_after}),
+        _response({"data": [_paper()], "token": None}),
+    ]
+
+    result = _collector(http, max_retries=1, backoff_seconds=2).collect()
+
+    assert len(result.papers) == 1
+    assert sleeps == [2.0]
 
 
 def test_transport_errors_retry_and_propagate_after_exhaustion(monkeypatch):
@@ -386,17 +451,35 @@ def test_legacy_bulk_modes_keep_request_and_result_contracts(mode, sort):
     )
 
 
+def test_legacy_bulk_mode_follows_continuation_tokens():
+    http = MagicMock()
+    http.get.side_effect = [
+        _response({"data": [_legacy_paper("First")], "token": "page-two"}),
+        _response({"data": [_legacy_paper("Second")], "token": None}),
+    ]
+
+    result = _legacy_collector(http, max_results=2).collect()
+
+    assert [paper.title for paper in result.papers] == ["First", "Second"]
+    assert http.get.call_count == 2
+    assert http.get.call_args.kwargs["params"]["token"] == "page-two"
+
+
 def test_legacy_most_relevant_mode_keeps_offset_search_contract():
     http = MagicMock()
-    http.get.return_value = _response({"data": [_legacy_paper()], "next": None})
+    http.get.side_effect = [
+        _response({"data": [_legacy_paper("First")], "next": 2}),
+        _response({"data": [_legacy_paper("Second")], "next": None}),
+    ]
 
-    result = _legacy_collector(http, mode="most_relevant").collect()
+    result = _legacy_collector(http, mode="most_relevant", max_results=2).collect()
 
     assert isinstance(result, PaperInfoCollection)
-    assert http.get.call_count == 1
+    assert [paper.title for paper in result.papers] == ["First", "Second"]
+    assert http.get.call_count == 2
     call = http.get.call_args
     assert call.args[0] == f"{API_URL}/paper/search"
-    assert call.kwargs["params"] == {"query": "legacy query"}
+    assert call.kwargs["params"] == {"query": "legacy query", "offset": 2}
 
 
 def test_legacy_provider_error_retry_remains_five_seconds(monkeypatch):

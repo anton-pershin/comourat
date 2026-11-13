@@ -8,6 +8,7 @@ Comourat is a library, not a pipeline runner. Callers create and configure the c
 
 - Access paper metadata and citation graphs through arXiv, Semantic Scholar, and OpenAlex clients.
 - Search Semantic Scholar and convert its results to paper information models.
+- Collect Semantic Scholar paper candidates for several queries and an inclusive publication-date range.
 - Discover and expand paper candidates, including forward citation expansion, backward reference expansion, and title-based relevance search.
 - Resolve paper candidates to source records and check for matching arXiv PDF URLs.
 - Calculate post and citation influence scores and assess author authority.
@@ -50,6 +51,47 @@ for paper in page.papers:
 ```
 
 The OpenAlex client uses the public API when no API key is provided. Pass `api_key` to use an API key. Other clients and collectors accept their settings through constructor arguments. Do not put credentials in source control.
+
+## Collect Semantic Scholar papers in a publication window
+
+Use `publication_window` mode to collect one or more keyword queries over the same inclusive publication-date range. The caller supplies the dates directly. Comourat does not calculate lag, stride, backfill, or reference dates.
+
+```python
+import httpx
+
+from comourat.collectors.semantic_scholar import SemanticScholarPaperCollectorCore
+from comourat.models import SemanticScholarBulkSearchResult
+
+with httpx.Client() as http_client:
+    collector = SemanticScholarPaperCollectorCore(
+        http_client=http_client,
+        api_url="https://api.semanticscholar.org/graph/v1",
+        mode="publication_window",
+        queries=["retrieval augmented generation", "citation graphs"],
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        max_results_per_query=100,
+    )
+    result = collector.collect()
+
+assert isinstance(result, SemanticScholarBulkSearchResult)
+for paper in result.papers:
+    print(paper.title, paper.semantic_scholar_id, paper.arxiv_id, paper.doi)
+for query_result in result.query_results:
+    print(
+        query_result.query,
+        query_result.candidate_count,
+        query_result.cap_reached,
+    )
+```
+
+Pass `api_key` to the constructor when the provider requires authentication. Comourat does not read the key from environment variables or configuration files. The existing requests-based `SemanticScholarClient` remains available for graph operations. It is not a second bulk-search transport.
+
+`collect()` has a mode-dependent return type. The assertion in the example narrows this type for static type checkers. `SemanticScholarBulkSearchResult.papers` contains neutral candidates in configured query order. Candidates from different queries are not merged. Each candidate retains the optional Semantic Scholar provider paper ID in `semantic_scholar_id`. Its arXiv and DOI fields use the same normalization as `PaperIdentity.from_values`. `query_results` contains one entry per configured query with its accepted-candidate count and cap state.
+
+The collector excludes records without a title or a valid ISO publication date. It also excludes records outside the inclusive range. By default, `max_results_per_query=None` follows continuation tokens until the result set ends. A positive cap counts accepted candidates independently for each query. The collector makes no extra request after a query reaches its cap. `cap_reached` reports whether the accepted-candidate count reached the configured cap.
+
+The new mode retries `httpx` transport errors, HTTP 429, and HTTP 5xx responses. `max_retries` defaults to four retries after the first attempt. The retry delay uses a valid `Retry-After` value when supplied. Otherwise, it uses exponential backoff with `backoff_seconds`, plus `jitter_seconds`. The defaults are 30 seconds for `timeout_seconds`, two seconds for `backoff_seconds`, four seconds for `regular_delay_seconds`, and one second for `jitter_seconds`. A non-retryable HTTP error raises at once. An exhausted retry sequence raises the last transport or HTTP status error. The legacy `newest`, `most_relevant`, and `most_influential` modes keep their existing retry behavior and `PaperInfoCollection` results.
 
 ## Example: get arXiv title and abstract
 

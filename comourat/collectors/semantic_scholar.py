@@ -1,6 +1,7 @@
 import datetime
 import json
 import logging
+import math
 import random
 import time
 from typing import Any, Callable, Literal, TypeAlias, TypeVar
@@ -365,14 +366,15 @@ class SemanticScholarPaperCollectorCore:
         raise RuntimeError("unreachable")
 
     def _retry_delay(self, attempt: int, retry_after: str | None = None) -> float:
-        try:
-            delay = (
-                max(float(retry_after), 0.0)
-                if retry_after is not None
-                else self.backoff_seconds * (2**attempt)
-            )
-        except ValueError:
-            delay = self.backoff_seconds * (2**attempt)
+        delay = self.backoff_seconds * (2**attempt)
+        if retry_after is not None:
+            try:
+                retry_after_delay = float(retry_after)
+            except ValueError:
+                pass
+            else:
+                if math.isfinite(retry_after_delay) and retry_after_delay >= 0:
+                    delay = retry_after_delay
         return delay + random.uniform(0.0, self.jitter_seconds)
 
     def _candidate_from_bulk_data(
