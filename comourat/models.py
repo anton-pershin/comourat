@@ -161,6 +161,10 @@ class PaperCandidate(BaseModel):
     )
     arxiv_id: str | None = None
     doi: str | None = None
+    semantic_scholar_id: str | None = Field(
+        default=None,
+        description="Semantic Scholar provider paper ID, when supplied by the source",
+    )
     publication_date: str | None = Field(
         default=None,
         description=(
@@ -189,6 +193,21 @@ class PaperCandidateCollection(BaseModel):
     """Collection of discovered paper candidates."""
 
     papers: list[PaperCandidate]
+
+
+class SemanticScholarQueryResult(BaseModel):
+    """Accepted-candidate count and cap state for one source query."""
+
+    query: str
+    candidate_count: int
+    cap_reached: bool
+
+
+class SemanticScholarBulkSearchResult(BaseModel):
+    """Candidates and per-query results from publication-window collection."""
+
+    papers: list[PaperCandidate]
+    query_results: list[SemanticScholarQueryResult]
 
 
 class PaperInfo(BaseModel):
