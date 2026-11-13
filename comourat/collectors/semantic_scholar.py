@@ -291,6 +291,10 @@ class SemanticScholarPaperCollectorCore:
                     authors=[
                         author_data["name"] for author_data in ss_paper_data["authors"]
                     ],
+                    author_ids=[
+                        author_data.get("authorId")
+                        for author_data in ss_paper_data["authors"]
+                    ],
                     publication_date=publication_date,
                 )
             )

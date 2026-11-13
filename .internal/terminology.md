@@ -39,7 +39,9 @@
 | Fail-open scoring | Assigning a score of zero when authority assessment cannot produce a usable result. |
 | Verified arXiv PDF | An arXiv PDF URL confirmed to match a paper record. |
 | New submission | An arXiv RSS entry announced as new, rather than as a replacement or cross-listing. |
-| Author affiliation | An institution associated with an author, extracted from a paper page. |
+| Author affiliation | An institution associated with an author, obtained from a paper page or a content-source author endpoint. |
+| Semantic Scholar author ID | The Semantic Scholar `authorId` value retained on a paper result or returned in an author record. |
+| Author record | A normalized record containing an author ID, name, and available affiliations. |
 | Reddit post | A post collected from Reddit, with its source identifiers and available engagement data. |
 | Hacker News story | A Hacker News submission with its title, URL, points, and comment count. |
 | Pagination continuation | A source-provided value used to request the next page of results. |

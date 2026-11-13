@@ -72,6 +72,14 @@ class PaperRecord(BaseModel):
     raw_influence: dict[str, float | int] = Field(default_factory=dict)
 
 
+class AuthorRecord(BaseModel):
+    """Provider-neutral author data returned by a content-source client."""
+
+    author_id: str
+    name: str = ""
+    affiliations: list[str] = Field(default_factory=list)
+
+
 class PaperPage(BaseModel):
     """A page of records; continuation is opaque to the caller."""
 
@@ -216,6 +224,10 @@ class PaperInfo(BaseModel):
     abstract: str = Field(description="Abstract of the paper")
     citation_count: int | None = Field(description="Number of citations", default=None)
     authors: list[str] | None = Field(description="Authors of the paper", default=None)
+    author_ids: list[str | None] | None = Field(
+        default=None,
+        description="Source author IDs aligned by index with authors, when supplied",
+    )
     publication_date: date | None = Field(
         description="Date of publication", default=None
     )
