@@ -13,6 +13,7 @@
 | Paper record | A normalized record for a paper, including its identity and available metadata. |
 | Paper page | One page of paper records returned by a source, with continuation data when more results are available. |
 | Paper candidate | A paper proposed by a collection or discovery component before resolution. |
+| Semantic Scholar provider paper ID | The Semantic Scholar `paperId` value retained on a paper candidate. |
 | Paper resolution | Matching a paper candidate to a paper record from a source. |
 | Resolved paper | A paper record matched to a paper candidate. |
 | Title similarity threshold | The minimum title similarity required to accept a candidate-to-record match. |

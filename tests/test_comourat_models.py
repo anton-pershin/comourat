@@ -59,6 +59,7 @@ class TestPaperCandidateBoundary:
             description="D",
             urls_seen=["https://arxiv.org/abs/2401.00001"],
             arxiv_id="2401.00001",
+            semantic_scholar_id="provider-paper-id",
             publication_date="2024-01-01",
             influence_score=77,
         )
