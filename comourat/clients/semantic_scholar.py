@@ -12,6 +12,7 @@ from urllib.parse import quote
 import requests
 
 from comourat.models import (
+    AuthorRecord,
     PaperIdentity,
     PaperPage,
     PaperRecord,
@@ -22,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.semanticscholar.org/graph/v1"
 FIELDS = "title,authors,abstract,publicationDate,citationCount,externalIds"
+# The provider accepts at most 1000 IDs in one author-batch request.
+AUTHOR_BATCH_SIZE = 1000
 
 
 class SemanticScholarClient:
@@ -66,14 +69,27 @@ class SemanticScholarClient:
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = dict(params or {})
         params.setdefault("fields", FIELDS)
+        return self._request("GET", path, params=params)
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> Any:
         headers = {"x-api-key": self.api_key} if self.api_key else {}
+        url = f"{self.api_url}/{quote(path.lstrip('/'), safe='/:')}"
         for attempt in range(self.max_retries + 1):
-            response = self._session.get(
-                f"{self.api_url}/{quote(path.lstrip('/'), safe='/:')}",
-                params=params,
-                headers=headers,
-                timeout=self.timeout_seconds,
-            )
+            request = self._session.get if method == "GET" else self._session.post
+            kwargs: dict[str, Any] = {
+                "params": dict(params or {}),
+                "headers": headers,
+                "timeout": self.timeout_seconds,
+            }
+            if json_body is not None:
+                kwargs["json"] = json_body
+            response = request(url, **kwargs)
             if response.status_code == 200:
                 if self.regular_delay_seconds:
                     time.sleep(self.regular_delay_seconds)
@@ -145,6 +161,32 @@ class SemanticScholarClient:
             papers=[self._record(p) for p in payload.get("data") or []],
             continuation=payload.get("next"),
         )
+
+    def get_authors(self, author_ids: list[str]) -> list[AuthorRecord]:
+        """Return available author names and affiliations in input chunk order."""
+        records: list[AuthorRecord] = []
+        for start in range(0, len(author_ids), AUTHOR_BATCH_SIZE):
+            batch = author_ids[start : start + AUTHOR_BATCH_SIZE]
+            payload = self._request(
+                "POST",
+                "author/batch",
+                params={"fields": "name,affiliations"},
+                json_body={"ids": batch},
+            )
+            for author in payload or []:
+                if not isinstance(author, dict):
+                    continue
+                author_id = author.get("authorId")
+                if not author_id:
+                    continue
+                records.append(
+                    AuthorRecord(
+                        author_id=author_id,
+                        name=author.get("name") or "",
+                        affiliations=author.get("affiliations") or [],
+                    )
+                )
+        return records
 
     def _provider_id(self, identity: PaperIdentity) -> str:
         if identity.arxiv_id:

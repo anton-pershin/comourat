@@ -65,7 +65,9 @@ def test_author_batch_request_and_complete_response_conversion():
     assert [record.name for record in records] == ["First Author", "Second Author"]
     assert records[0].affiliations == ["First University", "Research Institute"]
     assert records[1].affiliations == []
-    assert type(records[0]).model_validate_json(records[0].model_dump_json()) == records[0]
+    assert (
+        type(records[0]).model_validate_json(records[0].model_dump_json()) == records[0]
+    )
     http.post.assert_called_once_with(
         f"{API_URL}/author/batch",
         params={"fields": "name,affiliations"},

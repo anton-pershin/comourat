@@ -82,13 +82,13 @@ flowchart LR
 
 #### 3.3 Todo list
 
-1. [ ] Write the tests.
-2. [ ] Run the focused tests and ensure that they fail.
-3. [ ] Extend the neutral models, legacy conversion, and Semantic Scholar client.
-4. [ ] Run the focused tests and fix failures.
-5. [ ] Update the README and terminology document.
-6. [ ] Run the complete suite and all repository quality checks.
-7. [ ] Push the assigned branch and open a pull request linked to issue #24.
+1. [x] Write the tests.
+2. [x] Run the focused tests and ensure that they fail.
+3. [x] Extend the neutral models, legacy conversion, and Semantic Scholar client.
+4. [x] Run the focused tests and fix failures.
+5. [x] Update the README and terminology document.
+6. [x] Run the complete suite and all repository quality checks.
+7. [x] Push the assigned branch and open a pull request linked to issue #24.
 
 #### 3.4 Modification summary
 

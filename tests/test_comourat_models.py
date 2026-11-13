@@ -7,6 +7,7 @@ import pytest
 from pydantic import TypeAdapter
 
 from comourat.models import (
+    AuthorRecord,
     EnrichmentResult,
     EnrichmentSuccess,
     HNPostCollection,
@@ -143,8 +144,6 @@ class TestInfoAndEnrichmentModels:
         assert adapter.validate_json(enrichment.model_dump_json()) == enrichment
 
     def test_author_record_roundtrip(self):
-        from comourat.models import AuthorRecord
-
         author = AuthorRecord(
             author_id="author-1",
             name="Author",

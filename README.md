@@ -7,7 +7,8 @@ Comourat is a library, not a pipeline runner. Callers create and configure the c
 ## Features
 
 - Access paper metadata and citation graphs through arXiv, Semantic Scholar, and OpenAlex clients.
-- Search Semantic Scholar and convert its results to paper information models.
+- Search Semantic Scholar and convert its results to paper information models with aligned author IDs.
+- Retrieve Semantic Scholar author names and affiliations through bounded author batches.
 - Collect Semantic Scholar paper candidates for several queries and an inclusive publication-date range.
 - Discover and expand paper candidates, including forward citation expansion, backward reference expansion, and title-based relevance search.
 - Resolve paper candidates to source records and check for matching arXiv PDF URLs.
@@ -92,6 +93,33 @@ Pass `api_key` to the constructor when the provider requires authentication. Com
 The collector excludes records without a title or a valid ISO publication date. It also excludes records outside the inclusive range. By default, `max_results_per_query=None` follows continuation tokens until the result set ends. A positive cap counts accepted candidates independently for each query. The collector makes no extra request after a query reaches its cap. `cap_reached` reports whether the accepted-candidate count reached the configured cap.
 
 The new mode retries `httpx` transport errors, HTTP 429, and HTTP 5xx responses. `max_retries` defaults to four retries after the first attempt. The retry delay uses a valid `Retry-After` value when supplied. Otherwise, it uses exponential backoff with `backoff_seconds`, plus `jitter_seconds`. The defaults are 30 seconds for `timeout_seconds`, two seconds for `backoff_seconds`, four seconds for `regular_delay_seconds`, and one second for `jitter_seconds`. A non-retryable HTTP error raises at once. An exhausted retry sequence raises the last transport or HTTP status error. The legacy `newest`, `most_relevant`, and `most_influential` modes keep their existing retry behavior and `PaperInfoCollection` results.
+
+## Semantic Scholar author IDs and affiliations
+
+The `newest`, `most_relevant`, and `most_influential` collector modes retain source author IDs in `PaperInfo.author_ids`. Each list entry corresponds to the author name at the same index in `PaperInfo.authors`. An entry is `None` when the source does not supply an ID. Other IDs remain available. Existing code that constructs `PaperInfo` directly can omit `author_ids`; its default is `None`.
+
+Use `SemanticScholarClient.get_authors` to retrieve author names and affiliations:
+
+```python
+from comourat.clients.semantic_scholar import SemanticScholarClient
+
+client = SemanticScholarClient(
+    api_key=None,
+    proxy=None,
+    timeout_seconds=30,
+    max_retries=4,
+)
+authors = client.get_authors(["author-id-1", "author-id-2"])
+
+for author in authors:
+    print(author.author_id, author.name, author.affiliations)
+```
+
+The method sends `POST <api_url>/author/batch` with query `fields=name,affiliations` and a JSON body such as `{"ids": ["author-id-1"]}`. It returns neutral `AuthorRecord` models with `author_id`, `name`, and `affiliations` fields. Empty input returns an empty list without an HTTP request. Larger inputs use ordered chunks of at most 1000 IDs, which is the provider batch limit.
+
+A null response entry or an entry without an author ID produces no record. An omitted input ID needs no placeholder. A missing or null name becomes an empty string. A missing, null, or empty affiliation field produces an empty list. Valid records keep their response order even when other entries are incomplete. Comourat does not insert an application-specific unknown-affiliation value.
+
+Pass the API key, proxy, API URL, and transport settings directly to `SemanticScholarClient`. The method uses the same `timeout_seconds`, `regular_delay_seconds`, `max_retries`, `backoff_seconds`, and `jitter_seconds` pattern as the existing graph operations. It retries HTTP 429 and HTTP 5xx responses up to the configured limit, honors a valid `Retry-After` value, and otherwise uses exponential backoff plus jitter. Non-retryable statuses, exhausted statuses, and transport exceptions reach the caller. A terminal failure does not become a successful empty result.
 
 ## Example: get arXiv title and abstract
 
