@@ -133,6 +133,16 @@ class TestIdentityModels:
         assert record.citation_count == 7
         assert record.raw_influence == {"fwci": 1.5}
 
+    def test_paper_record_author_records_default_and_roundtrip(self):
+        record = PaperRecord(title="T")
+        assert record.author_records == []
+
+        record.author_records = [
+            AuthorRecord(name="Alice", affiliations=["Institute A"])
+        ]
+        assert record.author_records[0].author_id is None
+        assert PaperRecord.model_validate_json(record.model_dump_json()) == record
+
 
 class TestInfoAndEnrichmentModels:
     def test_paper_info_and_enrichment_roundtrip(self):

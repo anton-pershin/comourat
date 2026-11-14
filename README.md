@@ -53,6 +53,22 @@ for paper in page.papers:
 
 The OpenAlex client uses the public API when no API key is provided. Pass `api_key` to use an API key. Other clients and collectors accept their settings through constructor arguments. Do not put credentials in source control.
 
+## OpenAlex paper author affiliations
+
+`OpenAlexClient.resolve_by_doi` returns author affiliations with the other paper metadata. Each entry in `PaperRecord.author_records` contains the author name, an optional OpenAlex author ID, and an affiliation list. The entry has the same index as the retained author name in `PaperRecord.authors`.
+
+```python
+paper = client.resolve_by_doi("10.1234/example")
+
+if paper is not None:
+    for author in paper.author_records:
+        print(author.name, author.author_id, author.affiliations)
+```
+
+OpenAlex institution display names come before raw affiliation strings in each affiliation list. Comourat keeps source order and removes exact duplicates. It does not merge different strings or change their letter case. Empty or malformed values are ignored only for their author. A missing author ID becomes `None` without removing the name or affiliations. An author without usable affiliation data has an empty list.
+
+Existing `PaperRecord.authors` behavior and other paper fields are unchanged. Direct `PaperRecord` construction can omit `author_records`; its default is an empty list. Other sources can also leave the list empty. The OpenAlex client uses its existing select fields, timeout, pacing, and bounded retries. An unresolved DOI returns `None`, and terminal request failures remain explicit.
+
 ## Collect Semantic Scholar papers in a publication window
 
 Use `publication_window` mode to collect one or more keyword queries over the same inclusive publication-date range. The caller supplies the dates directly. Comourat does not calculate lag, stride, backfill, or reference dates.

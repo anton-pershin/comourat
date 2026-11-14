@@ -60,24 +60,25 @@ def normalize_doi(value: str | None) -> str | None:
     return value or None
 
 
+class AuthorRecord(BaseModel):
+    """Provider-neutral author data from a content source."""
+
+    author_id: str | None = None
+    name: str = ""
+    affiliations: list[str] = Field(default_factory=list)
+
+
 class PaperRecord(BaseModel):
     """Provider-neutral paper record returned by a graph client."""
 
     identity: PaperIdentity = Field(default_factory=PaperIdentity)
     title: str
     authors: list[str] = Field(default_factory=list)
+    author_records: list[AuthorRecord] = Field(default_factory=list)
     abstract: str = ""
     publication_date: date | None = None
     citation_count: int | None = None
     raw_influence: dict[str, float | int] = Field(default_factory=dict)
-
-
-class AuthorRecord(BaseModel):
-    """Provider-neutral author data returned by a content-source client."""
-
-    author_id: str
-    name: str = ""
-    affiliations: list[str] = Field(default_factory=list)
 
 
 class PaperPage(BaseModel):
