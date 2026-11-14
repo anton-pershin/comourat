@@ -87,7 +87,7 @@ flowchart LR
 4. [x] Run the focused tests and fix failures.
 5. [x] Update the README and terminology document.
 6. [x] Run the complete suite and all repository quality checks.
-7. [ ] Push the assigned branch and open a pull request linked to issue #28.
+7. [x] Push the assigned branch and open a pull request linked to issue #28.
 
 #### 3.4 Modification summary
 
