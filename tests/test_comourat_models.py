@@ -41,6 +41,7 @@ class TestPaperCandidateBoundary:
         assert candidate.provenance == []
         assert candidate.announce_type is None
         assert candidate.affiliations is None
+        assert candidate.author_ids is None
 
         candidate.provenance = ["forward_citations"]
         candidate.announce_type = "replace"
@@ -57,6 +58,7 @@ class TestPaperCandidateBoundary:
         candidate = PaperCandidate(
             title="T",
             authors=["A"],
+            author_ids=["author-a"],
             description="D",
             urls_seen=["https://arxiv.org/abs/2401.00001"],
             arxiv_id="2401.00001",

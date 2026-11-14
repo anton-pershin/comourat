@@ -183,6 +183,66 @@ def test_multiple_queries_map_candidates_and_report_counts():
         ]
 
 
+def test_publication_window_retains_complete_author_ids_and_candidate_fields():
+    paper = _paper(
+        arxiv_id="arXiv:2401.00001v2",
+        doi="https://doi.org/10.1234/First",
+    )
+    paper["authors"] = [
+        {"authorId": "author-a", "name": "A. Author"},
+        {"authorId": "author-b", "name": "B. Author"},
+    ]
+    http = MagicMock()
+    http.get.return_value = _response({"data": [paper], "token": None})
+
+    result = _collector(http).collect()
+
+    assert result.papers[0].model_dump() == {
+        "title": "Journal paper",
+        "authors": ["A. Author", "B. Author"],
+        "author_ids": ["author-a", "author-b"],
+        "description": "Abstract",
+        "urls_seen": ["https://example.com/ss-1"],
+        "arxiv_id": "2401.00001",
+        "doi": "10.1234/First",
+        "semantic_scholar_id": "ss-1",
+        "publication_date": "2024-01-02",
+        "influence_score": None,
+        "provenance": ["semantic_scholar"],
+        "announce_type": None,
+        "affiliations": None,
+    }
+    assert http.get.call_count == 1
+
+
+def test_publication_window_preserves_partial_author_id_alignment():
+    paper = _paper()
+    paper["authors"] = [
+        {"authorId": "author-1", "name": "First Author"},
+        {"name": "Second Author"},
+        {"authorId": None, "name": "Third Author"},
+        {"authorId": "excluded-author"},
+        {"authorId": "author-5", "name": "Fifth Author"},
+    ]
+    http = MagicMock()
+    http.get.return_value = _response({"data": [paper], "token": None})
+
+    result = _collector(http).collect()
+
+    assert result.papers[0].authors == [
+        "First Author",
+        "Second Author",
+        "Third Author",
+        "Fifth Author",
+    ]
+    assert result.papers[0].author_ids == [
+        "author-1",
+        None,
+        None,
+        "author-5",
+    ]
+
+
 def test_candidate_filtering_and_provider_id_absence():
     http = MagicMock()
     http.get.return_value = _response(

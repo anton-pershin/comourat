@@ -90,13 +90,15 @@ Pass `api_key` to the constructor when the provider requires authentication. Com
 
 `collect()` has a mode-dependent return type. The assertion in the example narrows this type for static type checkers. `SemanticScholarBulkSearchResult.papers` contains neutral candidates in configured query order. Candidates from different queries are not merged. Each candidate retains the optional Semantic Scholar provider paper ID in `semantic_scholar_id`. Its arXiv and DOI fields use the same normalization as `PaperIdentity.from_values`. `query_results` contains one entry per configured query with its accepted-candidate count and cap state.
 
+Publication-window candidates retain source author IDs in `PaperCandidate.author_ids`. Each list entry corresponds to the author name at the same index in `PaperCandidate.authors`. A missing or null source ID becomes `None` without changing other entries. If the source supplies no author name, conversion excludes that author's name and ID together. Existing code that constructs `PaperCandidate` directly can omit `author_ids`; its default is `None`.
+
 The collector excludes records without a title or a valid ISO publication date. It also excludes records outside the inclusive range. By default, `max_results_per_query=None` follows continuation tokens until the result set ends. A positive cap counts accepted candidates independently for each query. The collector makes no extra request after a query reaches its cap. `cap_reached` reports whether the accepted-candidate count reached the configured cap.
 
 The new mode retries `httpx` transport errors, HTTP 429, and HTTP 5xx responses. `max_retries` defaults to four retries after the first attempt. The retry delay uses a valid `Retry-After` value when supplied. Otherwise, it uses exponential backoff with `backoff_seconds`, plus `jitter_seconds`. The defaults are 30 seconds for `timeout_seconds`, two seconds for `backoff_seconds`, four seconds for `regular_delay_seconds`, and one second for `jitter_seconds`. A non-retryable HTTP error raises at once. An exhausted retry sequence raises the last transport or HTTP status error. The legacy `newest`, `most_relevant`, and `most_influential` modes keep their existing retry behavior and `PaperInfoCollection` results.
 
 ## Semantic Scholar author IDs and affiliations
 
-The `newest`, `most_relevant`, and `most_influential` collector modes retain source author IDs in `PaperInfo.author_ids`. Each list entry corresponds to the author name at the same index in `PaperInfo.authors`. An entry is `None` when the source does not supply an ID. Other IDs remain available. Existing code that constructs `PaperInfo` directly can omit `author_ids`; its default is `None`.
+The legacy `newest`, `most_relevant`, and `most_influential` collector modes separately retain source author IDs in `PaperInfo.author_ids`. Each list entry corresponds to the author name at the same index in `PaperInfo.authors`. An entry is `None` when the source does not supply an ID. Other IDs remain available. Existing code that constructs `PaperInfo` directly can omit `author_ids`; its default is `None`.
 
 Use `SemanticScholarClient.get_authors` to retrieve author names and affiliations:
 

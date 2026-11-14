@@ -40,7 +40,7 @@
 | Verified arXiv PDF | An arXiv PDF URL confirmed to match a paper record. |
 | New submission | An arXiv RSS entry announced as new, rather than as a replacement or cross-listing. |
 | Author affiliation | An institution associated with an author, obtained from a paper page or a content-source author endpoint. |
-| Semantic Scholar author ID | The Semantic Scholar `authorId` value retained on a paper result or returned in an author record. |
+| Semantic Scholar author ID | The Semantic Scholar `authorId` value retained with aligned author names on a legacy `PaperInfo` or publication-window `PaperCandidate`, or returned in an author record. |
 | Author record | A normalized record containing an author ID, name, and available affiliations. |
 | Reddit post | A post collected from Reddit, with its source identifiers and available engagement data. |
 | Hacker News story | A Hacker News submission with its title, URL, points, and comment count. |
