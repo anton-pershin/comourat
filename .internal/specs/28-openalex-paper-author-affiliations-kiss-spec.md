@@ -81,12 +81,12 @@ flowchart LR
 
 #### 3.3 Todo list
 
-1. [ ] Write the tests.
-2. [ ] Run the focused tests and ensure that they fail.
-3. [ ] Extend the neutral models and OpenAlex conversion.
-4. [ ] Run the focused tests and fix failures.
-5. [ ] Update the README and terminology document.
-6. [ ] Run the complete suite and all repository quality checks.
+1. [x] Write the tests.
+2. [x] Run the focused tests and ensure that they fail.
+3. [x] Extend the neutral models and OpenAlex conversion.
+4. [x] Run the focused tests and fix failures.
+5. [x] Update the README and terminology document.
+6. [x] Run the complete suite and all repository quality checks.
 7. [ ] Push the assigned branch and open a pull request linked to issue #28.
 
 #### 3.4 Modification summary
@@ -97,6 +97,6 @@ flowchart LR
 | `.internal/terminology.md` | Modified: include optional author IDs and paper-level affiliation metadata. |
 | `comourat/models.py` | Modified: add paper author records and permit a missing author ID. |
 | `comourat/clients/openalex.py` | Modified: convert author IDs, institution names, and raw affiliation strings. |
-| `tests/test_comourat_clients.py` | Modified: cover DOI conversion, partial data, duplicate removal, and failure compatibility. |
+| `tests/test_comourat_openalex_affiliations.py` | New: cover DOI conversion, partial data, duplicate removal, and failure compatibility. |
 | `tests/test_comourat_models.py` | Modified: cover neutral model defaults and serialization. |
 | `README.md` | Modified: document OpenAlex paper author affiliations. |

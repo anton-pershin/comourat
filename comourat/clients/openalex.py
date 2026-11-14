@@ -14,7 +14,7 @@ from typing import Any
 
 import requests
 
-from comourat.models import PaperIdentity, PaperPage, PaperRecord
+from comourat.models import AuthorRecord, PaperIdentity, PaperPage, PaperRecord
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,41 @@ def _abstract_from_inverted_index(inv: dict[str, list[int]] | None) -> str:
         (position, word) for word, indexes in inv.items() for position in indexes
     ]
     return " ".join(word for _, word in sorted(positions))
+
+
+def _author_record(authorship: dict[str, Any]) -> AuthorRecord | None:
+    author = authorship.get("author")
+    if not isinstance(author, dict):
+        return None
+    name = author.get("display_name")
+    if not isinstance(name, str) or not name:
+        return None
+    author_id = author.get("id")
+    if not isinstance(author_id, str) or not author_id:
+        author_id = None
+
+    affiliation_values: list[Any] = []
+    institutions = authorship.get("institutions")
+    if isinstance(institutions, list):
+        for institution in institutions:
+            if isinstance(institution, dict):
+                affiliation_values.append(institution.get("display_name"))
+    raw_strings = authorship.get("raw_affiliation_strings")
+    if isinstance(raw_strings, list):
+        affiliation_values.extend(raw_strings)
+
+    affiliations: list[str] = []
+    seen: set[str] = set()
+    for value in affiliation_values:
+        if not isinstance(value, str) or not value or value in seen:
+            continue
+        affiliations.append(value)
+        seen.add(value)
+    return AuthorRecord(
+        author_id=author_id,
+        name=name,
+        affiliations=affiliations,
+    )
 
 
 class OpenAlexClient:
@@ -203,14 +238,20 @@ class OpenAlexClient:
             if "arxiv.org/abs/" in landing:
                 arxiv_id = landing.rsplit("/", 1)[-1].split("v", 1)[0]
                 break
-        authors = [
-            entry.get("author", {}).get("display_name", "")
-            for entry in work.get("authorships", [])
+        authorships = work.get("authorships")
+        if not isinstance(authorships, list):
+            authorships = []
+        author_records = [
+            author_record
+            for entry in authorships
+            if isinstance(entry, dict)
+            and (author_record := _author_record(entry)) is not None
         ]
         return PaperRecord(
             identity=PaperIdentity.from_values(arxiv_id=arxiv_id, doi=doi),
             title=work.get("display_name") or work.get("title") or "",
-            authors=[name for name in authors if name],
+            authors=[author.name for author in author_records],
+            author_records=author_records,
             publication_date=(
                 date.fromisoformat(work["publication_date"])
                 if work.get("publication_date")
