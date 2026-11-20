@@ -97,6 +97,33 @@ class TestCitationInfluenceAssessor:
         assert self._assessor()._assess_one(paper, today=None) == (None, None)
 
 
+class TestAuthorityVerdict:
+    def test_optional_rationale_preserves_score_validation(self):
+        explained = AuthorityVerdict(
+            id="paper_0",
+            score=42,
+            rationale="The authors are affiliated with a leading institution.",
+        )
+        omitted = AuthorityVerdict(id="paper_1", score=0)
+        null = AuthorityVerdict(id="paper_2", score=10, rationale=None)
+
+        assert explained.rationale is not None
+        assert explained.score == 42
+        assert omitted.rationale is None
+        assert omitted.score == 0
+        assert omitted.model_dump() == {
+            "id": "paper_1",
+            "score": 0,
+            "rationale": None,
+        }
+        assert null.rationale is None
+        assert null.score == 10
+        with pytest.raises(ValueError):
+            AuthorityVerdict(id="paper_3", score=-1)
+        with pytest.raises(ValueError):
+            AuthorityVerdict(id="paper_4", score=101)
+
+
 class TestAuthorityCore:
     def _core(self, agent_output=None, fail=False):
         core = AuthorityInfluenceAssessorCore.__new__(AuthorityInfluenceAssessorCore)
@@ -114,26 +141,35 @@ class TestAuthorityCore:
         return core
 
     def test_every_candidate_gets_a_score(self):
-        verdicts = [AuthorityVerdict(id="paper_0", score=42)]
-        core = self._core(AuthorityResult(verdicts=verdicts))
+        verdict = AuthorityVerdict(id="paper_0", score=42)
+        core = self._core(AuthorityResult(verdicts=[verdict]))
         collection = PaperCandidateCollection(
             papers=[PaperCandidate(title="T", authors=["A"], description="D")]
         )
-        output, lines = core.assess(collection)
+        output, lines, verdicts_by_id = core.assess(collection)
         assert output.papers[0].influence_score == 42
         assert lines
+        assert verdicts_by_id == {"paper_0": verdict}
+        assert verdicts_by_id["paper_0"].rationale is None
 
     def test_transport_failure_zero_scores(self):
         core = self._core(fail=True)
         collection = PaperCandidateCollection(
             papers=[PaperCandidate(title="T", authors=["A"], description="D")]
         )
-        output, _ = core.assess(collection)
+        output, _, verdicts_by_id = core.assess(collection)
         assert output.papers[0].influence_score == 0
+        assert verdicts_by_id == {}
 
     def test_follow_up_call_for_missing_verdicts(self):
-        first = AuthorityResult(verdicts=[AuthorityVerdict(id="paper_0", score=10)])
-        follow_up = AuthorityResult(verdicts=[AuthorityVerdict(id="paper_1", score=20)])
+        initial_verdict = AuthorityVerdict(
+            id="paper_0", score=10, rationale="Initial rationale."
+        )
+        follow_up_verdict = AuthorityVerdict(
+            id="paper_1", score=20, rationale="Follow-up rationale."
+        )
+        first = AuthorityResult(verdicts=[initial_verdict])
+        follow_up = AuthorityResult(verdicts=[follow_up_verdict])
         core = self._core(first)
         core.agent.run_sync.side_effect = [
             MagicMock(output=first),
@@ -145,8 +181,14 @@ class TestAuthorityCore:
                 PaperCandidate(title="T1", authors=["A"], description="D"),
             ]
         )
-        output, _ = core.assess(collection)
+        output, _, verdicts_by_id = core.assess(collection)
         assert [p.influence_score for p in output.papers] == [10, 20]
+        assert verdicts_by_id == {
+            "paper_0": initial_verdict,
+            "paper_1": follow_up_verdict,
+        }
+        assert verdicts_by_id["paper_0"].rationale == "Initial rationale."
+        assert verdicts_by_id["paper_1"].rationale == "Follow-up rationale."
         assert core.agent.run_sync.call_count == 2
 
     def test_affiliations_reach_the_prompt(self):
@@ -163,7 +205,7 @@ class TestAuthorityCore:
                 PaperCandidate(title="T1", authors=["Bob"], description="D"),
             ]
         )
-        output, _ = core.assess(
+        output, _, _ = core.assess(
             collection,
             affiliations={0: {"Alice": ["MIT"]}},
         )
@@ -182,6 +224,111 @@ class TestAuthorityCore:
         prompt = core.agent.run_sync.call_args[0][0]
         assert '"affiliations": "unknown"' in prompt
 
+    def test_prompt_requests_a_bounded_rationale(self):
+        verdict = AuthorityVerdict(id="paper_0", score=5)
+        core = self._core(AuthorityResult(verdicts=[verdict]))
+        collection = PaperCandidateCollection(
+            papers=[PaperCandidate(title="T", authors=["A"], description="D")]
+        )
+
+        core.assess(collection)
+
+        prompt = core.agent.run_sync.call_args[0][0]
+        assert "a 'rationale'" in prompt
+        assert "one or two concise sentences" in prompt
+        assert "supplied authors and affiliations/institutions" in prompt
+
+    def test_assess_returns_verdicts_and_preserves_summary_lines(self):
+        rationale = "Alice is affiliated with MIT, a leading institution."
+        verdicts = [
+            AuthorityVerdict(id="paper_0", score=70, rationale=rationale),
+            AuthorityVerdict(id="paper_1", score=10),
+        ]
+        core = self._core(AuthorityResult(verdicts=verdicts))
+        collection = PaperCandidateCollection(
+            papers=[
+                PaperCandidate(
+                    title="T0",
+                    authors=["Alice"],
+                    description="D",
+                    arxiv_id="2401.00001",
+                ),
+                PaperCandidate(
+                    title="T1",
+                    authors=["Bob"],
+                    description="D",
+                    arxiv_id="2401.00002",
+                ),
+            ]
+        )
+
+        with patch(
+            "comourat.influence.authority.time.monotonic",
+            side_effect=[10.0, 10.5],
+        ):
+            output, lines, verdicts_by_id = core.assess(collection)
+
+        assert output is collection
+        assert [p.influence_score for p in output.papers] == [70, 10]
+        assert verdicts_by_id == {
+            "paper_0": verdicts[0],
+            "paper_1": verdicts[1],
+        }
+        assert verdicts_by_id["paper_0"].rationale == rationale
+        assert verdicts_by_id["paper_1"].rationale is None
+        assert lines == [
+            "Per-paper assessments:",
+            "- 2401.00001 | T0 | score: 70",
+            "- 2401.00002 | T1 | score: 10",
+            "Papers: 2, scored: 2, zero-scored (unassessable or failed): 0",
+            "(stage took 0.5s)",
+        ]
+        assert rationale not in "\n".join(lines)
+
+    def test_zero_score_verdict_differs_from_failed_follow_up(self):
+        zero_verdict = AuthorityVerdict(id="paper_0", score=0)
+        first = AuthorityResult(verdicts=[zero_verdict])
+        core = self._core(first)
+        core.agent.run_sync.side_effect = [
+            MagicMock(output=first),
+            RuntimeError("transport down"),
+        ]
+        collection = PaperCandidateCollection(
+            papers=[
+                PaperCandidate(
+                    title="T0",
+                    authors=["A"],
+                    description="D",
+                    arxiv_id="2401.00001",
+                ),
+                PaperCandidate(
+                    title="T1",
+                    authors=["B"],
+                    description="D",
+                    arxiv_id="2401.00002",
+                ),
+            ]
+        )
+
+        with patch(
+            "comourat.influence.authority.time.monotonic",
+            side_effect=[20.0, 20.5],
+        ):
+            output, lines, verdicts_by_id = core.assess(collection)
+
+        assert [p.influence_score for p in output.papers] == [0, 0]
+        assert verdicts_by_id == {"paper_0": zero_verdict}
+        assert verdicts_by_id["paper_0"].rationale is None
+        assert lines == [
+            "Per-paper assessments:",
+            "- 2401.00001 | T0 | score: 0",
+            "- 2401.00002 | T1 | unassessable: follow-up request failed after retries",
+            "Papers: 2, scored: 1, zero-scored (unassessable or failed): 1",
+            "Zero-scored papers:",
+            "- T1",
+            "(stage took 0.5s)",
+        ]
+
 
 class TestAuthorityStandaloneRetry:
     """Direct core tests, no adapter, no injected time/logger (review 2)."""
@@ -199,8 +346,9 @@ class TestAuthorityStandaloneRetry:
         collection = PaperCandidateCollection(
             papers=[PaperCandidate(title="T", authors=["A"], description="D")]
         )
-        output, _ = core.assess(collection)
+        output, _, verdicts_by_id = core.assess(collection)
         assert output.papers[0].influence_score == 0
+        assert verdicts_by_id == {}
         assert agent.run_sync.call_count == 3  # 1 + request_retries
 
     def test_constructed_core_retries_and_sleeps(self):
@@ -218,5 +366,6 @@ class TestAuthorityStandaloneRetry:
         collection = PaperCandidateCollection(
             papers=[PaperCandidate(title="T", authors=["A"], description="D")]
         )
-        output, _ = core.assess(collection)
+        output, _, verdicts_by_id = core.assess(collection)
         assert output.papers[0].influence_score == 0
+        assert verdicts_by_id == {}

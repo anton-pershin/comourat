@@ -160,6 +160,24 @@ Both `get_metadata` and `get_title_by_id` reject an arXiv provider error entry i
 
 Both `timeout_seconds` and `overall_timeout_seconds` default to 120 seconds. `timeout_seconds` caps each connection attempt and each response read without exceeding the remaining overall time. `overall_timeout_seconds` enforces one monotonic deadline for the complete operation. DNS resolution, connection setup, redirects, response headers and body transfer, retries, backoff, politeness delays, and Atom response parsing all consume the same budget. A slow or trickled response cannot restart or extend this deadline. Overall expiry raises `requests.Timeout`. These limits also apply to `get_title_by_id` and `search_by_title`.
 
+## Authority assessment verdicts
+
+`AuthorityInfluenceAssessorCore.assess()` returns the assessed `PaperCandidateCollection`, the existing summary lines, and a mapping of validated `AuthorityVerdict` objects:
+
+```python
+papers, summary_lines, verdicts_by_id = assessor.assess(
+    candidates,
+    affiliations={0: {"Alice": ["MIT"]}},
+)
+verdict = verdicts_by_id.get("paper_0")
+if verdict is not None:
+    print(verdict.score, verdict.rationale)
+```
+
+The mapping uses the same `paper_<index>` IDs as the assessment batches. Each verdict contains its paper ID, a score from 0 through 100, and an optional `rationale`. The prompt requests one or two concise sentences that explain the score from the supplied authors and affiliations or institutions. A response that omits the rationale remains valid and has `rationale is None`.
+
+The mapping contains every successfully validated verdict, including a score of 0 or an omitted rationale. A missing verdict or failed assessment has no mapping entry, even though its paper receives the existing fail-open score of 0. Summary lines keep their existing content and formatting and do not contain rationale text. Callers control any monitoring presentation of the returned rationales.
+
 ## Package layout
 
 - `comourat.clients` — external content-source clients.
