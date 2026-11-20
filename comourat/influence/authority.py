@@ -1,7 +1,8 @@
 """Authority influence assessment.
 
-Maps (authors, affiliations) -> a single 0-100 authority influence score
-per paper via a batched LLM call, judged against prompt-configured anchors.
+Maps (authors, affiliations) -> a 0-100 authority influence score and
+optional rationale per paper via a batched LLM call, judged against
+prompt-configured anchors.
 
 Batched classification per the established pattern: each paper in the
 prompt carries a stable id; verdicts are matched back by id; hallucinated
@@ -50,6 +51,13 @@ DEFAULT_SYSTEM_PROMPT = (
 class AuthorityVerdict(BaseModel):
     id: str = Field(description="The paper id exactly as given in the input")
     score: int = Field(description="Authority influence score 0-100", ge=0, le=100)
+    rationale: str | None = Field(
+        default=None,
+        description=(
+            "One or two concise sentences explaining the score from the supplied "
+            "authors and affiliations/institutions"
+        ),
+    )
 
 
 class AuthorityResult(BaseModel):
@@ -144,26 +152,33 @@ class AuthorityInfluenceAssessorCore:
         self,
         papers: list[tuple[str, PaperCandidate]],
         affiliations_by_id: dict[str, dict[str, list[str]]],
-    ) -> tuple[dict[str, int], bool]:
-        """One batch; return scores and whether a valid response was received."""
+    ) -> tuple[dict[str, AuthorityVerdict], bool]:
+        """One batch; return verdicts and whether a valid response was received."""
         prompt = (
             "Rate each paper's authority influence on a 0-100 scale.\n\n"
             + _render_papers(papers, affiliations_by_id)
             + "\n\nReturn one verdict per paper: its id (exactly as given) "
-            "and a 'score' 0-100. Return nothing else."
+            "and a 'score' 0-100. Include a 'rationale' with one or two concise "
+            "sentences explaining the score from the supplied authors and "
+            "affiliations/institutions. Return nothing else."
         )
         result = self._call_with_retries(prompt, len(papers))
         if result is None:
             return {}, False
         valid_ids = {pid for pid, _ in papers}
-        return {v.id: v.score for v in result.verdicts if v.id in valid_ids}, True
+        return {v.id: v for v in result.verdicts if v.id in valid_ids}, True
 
     def assess(
         self,
         data: PaperCandidateCollection,
         affiliations: dict[int, dict[str, list[str]]] | None = None,
-    ) -> tuple[PaperCandidateCollection, list[str]]:
-        """Assess papers in place; returns (papers, summary_lines).
+    ) -> tuple[PaperCandidateCollection, list[str], dict[str, AuthorityVerdict]]:
+        """Assess papers in place and return papers, summaries, and verdicts.
+
+        The third return value maps each ``paper_<index>`` ID to its validated
+        ``AuthorityVerdict``. It contains successful assessments, including
+        score 0 and verdicts without a rationale, but not failed or missing
+        assessments. Rationales are not added to the summary lines.
 
         `affiliations` maps paper INDEX to author->affiliations for that
         paper (application-level data the neutral model cannot carry).
@@ -173,6 +188,7 @@ class AuthorityInfluenceAssessorCore:
         t_start = time.monotonic()
         zero_scored: list[str] = []
         paper_assessments: list[str] = []
+        verdicts_by_id: dict[str, AuthorityVerdict] = {}
         total = len(data.papers)
         triples = [(f"paper_{i}", p) for i, p in enumerate(data.papers)]
 
@@ -193,9 +209,9 @@ class AuthorityInfluenceAssessorCore:
                 for pid, _ in batch
                 if int(pid.removeprefix("paper_")) in affiliations
             }
-            scores, batch_responded = self._run_batch(batch, affs_by_id)
+            batch_verdicts, batch_responded = self._run_batch(batch, affs_by_id)
 
-            missing = [(pid, p) for pid, p in batch if pid not in scores]
+            missing = [(pid, p) for pid, p in batch if pid not in batch_verdicts]
             unassessable_reasons = {
                 pid: (
                     "missing verdict"
@@ -204,7 +220,7 @@ class AuthorityInfluenceAssessorCore:
                 )
                 for pid, _ in missing
             }
-            if missing and scores:
+            if missing and batch_verdicts:
                 # ONE follow-up call with only the missing papers.
                 self.logger.info(
                     "authority follow-up call for %d missing verdicts",
@@ -218,7 +234,7 @@ class AuthorityInfluenceAssessorCore:
                         if int(pid.removeprefix("paper_")) in affiliations
                     },
                 )
-                scores.update(follow_up)
+                batch_verdicts.update(follow_up)
                 for pid, _ in missing:
                     if pid in follow_up:
                         unassessable_reasons.pop(pid, None)
@@ -228,9 +244,9 @@ class AuthorityInfluenceAssessorCore:
                         )
 
             for pid, paper in batch:
-                score = scores.get(pid)
+                verdict = batch_verdicts.get(pid)
                 identifier = _stable_identifier(paper)
-                if score is None:
+                if verdict is None:
                     zero_scored.append(paper.title)
                     paper.influence_score = 0
                     reason = unassessable_reasons[pid]
@@ -238,9 +254,10 @@ class AuthorityInfluenceAssessorCore:
                         f"- {identifier} | {paper.title} | unassessable: {reason}"
                     )
                 else:
-                    paper.influence_score = int(score)
+                    verdicts_by_id[pid] = verdict
+                    paper.influence_score = int(verdict.score)
                     lines_for_paper = (
-                        f"- {identifier} | {paper.title} | score: {int(score)}"
+                        f"- {identifier} | {paper.title} | score: {int(verdict.score)}"
                     )
                 paper_assessments.append(lines_for_paper)
 
@@ -254,4 +271,4 @@ class AuthorityInfluenceAssessorCore:
             lines.append("Zero-scored papers:")
             lines.extend(f"- {t}" for t in zero_scored)
         lines.append(f"(stage took {time.monotonic() - t_start:.1f}s)")
-        return data, lines
+        return data, lines, verdicts_by_id
