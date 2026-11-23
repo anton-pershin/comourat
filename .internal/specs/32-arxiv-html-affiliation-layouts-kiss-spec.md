@@ -84,13 +84,13 @@ The existing BeautifulSoup dependency parses the HTML instead of adding more nes
 
 #### 3.3 Todo list
 
-1. [ ] Write the specification and focused tests.
-2. [ ] Run the focused tests and ensure that the new cases fail.
-3. [ ] Implement the three layout parsers and all-empty handling.
-4. [ ] Run the focused tests and fix failures.
-5. [ ] Update the module documentation and specification evidence.
-6. [ ] Run the complete suite and all repository quality checks.
-7. [ ] Push the assigned branch and open a draft pull request linked to issue #32.
+1. [x] Write the specification and focused tests.
+2. [x] Run the focused tests and ensure that the new cases fail.
+3. [x] Implement the three layout parsers and all-empty handling.
+4. [x] Run the focused tests and fix failures.
+5. [x] Update the module documentation and specification evidence.
+6. [x] Run the complete suite and all repository quality checks.
+7. [x] Push the assigned branch and open a draft pull request linked to issue #32.
 
 #### 3.4 Modification summary
 
