@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from comourat.collectors.arxiv_html_affiliations import (
     ArxivHtmlAffiliationFetcherCore,
     _extract_affiliations,
@@ -92,6 +94,28 @@ def _fetch_affiliations(html: str):
     ).fetch_affiliations(PaperCandidateCollection(papers=[candidate]))
 
 
+def _inline_author_block(author: str, affiliations: list[str]) -> str:
+    affiliation_html = "".join(
+        '<span class="ltx_contact ltx_role_affiliation">'
+        '<span class="ltx_contact_name">Affiliation: </span>'
+        f"{affiliation}</span>"
+        for affiliation in affiliations
+    )
+    return (
+        '<span class="ltx_creator ltx_role_author">'
+        f'<span class="ltx_personname">{author}</span>'
+        '<span class="ltx_note ltx_note_frontmatter ltx_role_thanks">'
+        '<span class="ltx_note_content"><span class="ltx_text ltx_font_bold">'
+        "Corresponding author.</span></span></span>"
+        '<span class="ltx_author_notes"><span class="ltx_author_notes_content">'
+        f"{affiliation_html}"
+        '<span class="ltx_contact ltx_role_email">'
+        '<span class="ltx_contact_name">Email: </span>'
+        '<span class="ltx_text ltx_font_typewriter">author@example.test</span>'
+        "</span></span></span></span>"
+    )
+
+
 def test_inline_affiliations_keep_order_and_remove_exact_duplicates():
     html = """
     <span class="ltx_personname">Alice</span>
@@ -110,6 +134,81 @@ def test_inline_affiliations_keep_order_and_remove_exact_duplicates():
         "Alice": ["University of Somewhere", "Research Lab"],
         "Bob": ["Other Institute"],
     }
+
+
+NORTHEASTERN_AFFILIATION = (
+    "School of Computer Science and Engineering, Northeastern University, "
+    "Shenyang, China"
+)
+
+
+@pytest.mark.parametrize(
+    ("arxiv_id", "expected"),
+    [
+        (
+            "2611.27741",
+            {
+                "Yao Tong": [
+                    "Hangzhou Institute for Advanced Study",
+                    "University of Chinese Academy of Sciences",
+                    "Hangzhou, China",
+                ],
+                "Jiaxin Qi": [
+                    "Computer Network Information Center",
+                    "Chinese Academy of Sciences",
+                    "Beijing, China",
+                ],
+                "Dingyu Zhang": [
+                    "Hangzhou Institute for Advanced Study",
+                    "University of Chinese Academy of Sciences",
+                    "Hangzhou, China",
+                ],
+                "Jianqiang Huang": [
+                    "Computer Network Information Center",
+                    "Chinese Academy of Sciences",
+                    "Beijing, China",
+                ],
+            },
+        ),
+        (
+            "2611.27712",
+            {
+                "Xinyu Wang": [NORTHEASTERN_AFFILIATION],
+                "Yingfeng Luo": [NORTHEASTERN_AFFILIATION],
+                "Yuxin Gao": [NORTHEASTERN_AFFILIATION],
+                "Anxiang Ma": [
+                    NORTHEASTERN_AFFILIATION,
+                    "NiuTrans Research, Shenyang, China",
+                ],
+                "Jingbo Zhu": [
+                    NORTHEASTERN_AFFILIATION,
+                    "NiuTrans Research, Shenyang, China",
+                ],
+                "Tong Xiao": [
+                    NORTHEASTERN_AFFILIATION,
+                    "NiuTrans Research, Shenyang, China",
+                ],
+            },
+        ),
+        (
+            "2611.27100",
+            {
+                "Chenruo Liu": ["New York University"],
+                "Quan Zhang": ["Michigan State University"],
+                "Qi Lei": ["New York University"],
+            },
+        ),
+    ],
+)
+def test_known_good_inline_examples_keep_their_mappings(arxiv_id, expected):
+    html = '<div class="ltx_authors">'
+    html += "".join(
+        _inline_author_block(author, affiliations)
+        for author, affiliations in expected.items()
+    )
+    html += "</div>"
+
+    assert _extract_affiliations(html) == expected, arxiv_id
 
 
 def test_numbered_note_affiliations_map_shared_and_distinct_references():

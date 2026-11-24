@@ -12,7 +12,7 @@ This spec implements approved GitHub issue #32.
 
 **R4 — Unknown affiliations.** Count a fetched paper as having affiliations only when at least one extracted author has a non-empty affiliation list. If every list is empty, or no author mapping is extracted, set `paper.affiliations` to `None`, include the paper in the unknown-affiliations summary, and do not increment the with-affiliations count. If at least one affiliation is available, retain the extracted mapping, including empty lists for authors without an affiliation.
 
-**R5 — Offline verification and scope.** Use controlled HTML fixtures based on the two approved examples and mocked HTTP responses. Do not require live network access in automated tests. Run the complete Comourat test suite and repository quality checks. Do not change neutral data models, caller configuration, other collectors, or influence scoring.
+**R5 — Offline verification and scope.** Use controlled HTML fixtures based on the two approved examples, the known-good inline examples from the PR review, and mocked HTTP responses. Do not require live network access in automated tests. Run the complete Comourat test suite and repository quality checks. Do not change neutral data models, caller configuration, other collectors, or influence scoring.
 
 Expected behavior variants:
 
@@ -27,7 +27,7 @@ Expected behavior variants:
 
 Add focused tests to `tests/test_comourat_arxiv_html_affiliations.py`. Reuse or extend the existing collector test only where necessary.
 
-- **T1 — Inline layout regression.** Covers R1, R5, B1, and B6. Extract authors with one or more inline affiliation spans and an exact duplicate. Assert the existing mapping and affiliation order. Keep the existing fetcher test for its publication date and HTTP interaction.
+- **T1 — Inline layout regression.** Covers R1, R5, B1, and B6. Extract authors with one or more inline affiliation spans and an exact duplicate. Assert the existing mapping and affiliation order. Add controlled author-block fixtures based on known-good arXiv `2611.27741`, `2611.27712`, and `2611.27100`; include author-note wrappers, email spans, frontmatter notes, and single and multiple affiliations. Assert their exact existing mappings. Keep the existing fetcher test for its publication date and HTTP interaction.
 - **T2 — Numbered affiliation notes.** Covers R2, R4, R5, and B2. Use controlled markup from `2611.27092`, including four bold author names, numeric references, one footnote containing two affiliations, and trailing correspondence text. Assert all four exact author mappings, shared affiliations, preserved source affiliation detail, and exclusion of labels and correspondence.
 - **T3 — Tabular author block.** Covers R3, R4, R5, and B3. Use controlled markup from `2611.27500`, including two name rows, two affiliation rows, email rows, a superscript note mark, and an unrelated footnote. Assert the four exact author-to-affiliation mappings and absence of emails, note marks, and unrelated note text.
 - **T4 — Empty and partial fetch outcomes.** Covers R1, R4, R5, B4, B5, and B6. Mock successful Atom and HTML responses. For an all-empty mapping, assert `affiliations is None`, an unknown-paper summary entry, and a zero with-affiliations count. For a partial mapping, assert retention of non-empty and empty author lists and a with-affiliations count of one.
